@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>iOS audio experiment</title>
+  <style>
+    body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; background: #fff; color: #111; }
+    button { font-size: 18px; padding: 12px 20px; margin: 4px 0; }
+    pre { white-space: pre-wrap; word-break: break-word; font-size: 11px; background: #f4f4f4; padding: 8px; }
+    #phase { font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Streamed-audio scheduling experiment</h1>
+  <p>Tap Start, keep the page open. During the "background" phase, lock the screen for ~10 s, then come back. Results upload automatically at the end.</p>
+  <button id="start">Start (tap)</button>
+  <p id="phase">idle</p>
+  <pre id="out"></pre>
+  <script type="module" src="./experiment.ts"></script>
+</body>
+</html>

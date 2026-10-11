@@ -1,0 +1,239 @@
+{
+ "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Claude/2.31226.1 Chrome/152.0.7977.130 Safari/537.36 MSIX",
+ "startedAt": "2026-10-11T15:23:35.735Z",
+ "caps": {
+  "secureContext": true,
+  "stateBeforeGesture": "running",
+  "sampleRateHonored": true,
+  "getOutputTimestamp": true,
+  "outputLatencyProp": true,
+  "audioWorklet": true,
+  "webcodecsAudioDecoderOpus": true,
+  "webcodecsAudioEncoderOpus": true,
+  "audioSession": false,
+  "wakeLock": true,
+  "subtleCrypto": true,
+  "aesGcmDecryptMsPer2KB": 0.012,
+  "stateAtGestureCreate": "running",
+  "stateAfterResume": "running"
+ },
+ "phases": [
+  {
+   "name": "A: lead 300 ms",
+   "leadMs": 300,
+   "durationS": 8,
+   "lateEvery": 0,
+   "lateExtraMs": 0,
+   "chunks": 80,
+   "lateChunks": 0,
+   "droppedChunks": 0,
+   "decodeErrors": 0,
+   "decodeMs": {
+    "p50": 0.6,
+    "p95": 0.9,
+    "max": 3.2
+   },
+   "scheduleLeadMs": {
+    "p50": 498.67,
+    "p95": 500,
+    "max": 500
+   },
+   "clock": {
+    "updates": 488,
+    "stepMedianMs": 10.67,
+    "stepMaxMs": 10.67,
+    "audioVsPerfPpm": -180,
+    "outputLatencyMs": 40,
+    "baseLatencyMs": 10,
+    "outputTs": {
+     "contextTime": 4.748450999999999,
+     "performanceTime": 11411.90000000596,
+     "currentMinusContextMs": 51.5,
+     "nowMinusPerfTimeMs": 9.7
+    }
+   },
+   "monitor": {
+    "low": 0,
+    "jumps": 0,
+    "blocks": 2992
+   }
+  },
+  {
+   "name": "B: lead 100 ms",
+   "leadMs": 100,
+   "durationS": 6,
+   "lateEvery": 0,
+   "lateExtraMs": 0,
+   "chunks": 60,
+   "lateChunks": 0,
+   "droppedChunks": 0,
+   "decodeErrors": 0,
+   "decodeMs": {
+    "p50": 0.5,
+    "p95": 0.8,
+    "max": 1
+   },
+   "scheduleLeadMs": {
+    "p50": 98.67,
+    "p95": 100,
+    "max": 100
+   },
+   "clock": {
+    "updates": 503,
+    "stepMedianMs": 10.67,
+    "stepMaxMs": 10.67,
+    "audioVsPerfPpm": -31,
+    "outputLatencyMs": 40,
+    "baseLatencyMs": 10,
+    "outputTs": {
+     "contextTime": 13.867948,
+     "performanceTime": 20531.40000000596,
+     "currentMinusContextMs": 52.1,
+     "nowMinusPerfTimeMs": 9.4
+    }
+   },
+   "monitor": {
+    "low": 0,
+    "jumps": 0,
+    "blocks": 2242
+   }
+  },
+  {
+   "name": "C: lead 40 ms",
+   "leadMs": 40,
+   "durationS": 6,
+   "lateEvery": 0,
+   "lateExtraMs": 0,
+   "chunks": 60,
+   "lateChunks": 0,
+   "droppedChunks": 0,
+   "decodeErrors": 0,
+   "decodeMs": {
+    "p50": 0.5,
+    "p95": 1,
+    "max": 1.2
+   },
+   "scheduleLeadMs": {
+    "p50": 30.67,
+    "p95": 32,
+    "max": 32
+   },
+   "clock": {
+    "updates": 505,
+    "stepMedianMs": 10.67,
+    "stepMaxMs": 10.67,
+    "audioVsPerfPpm": -23,
+    "outputLatencyMs": 40,
+    "baseLatencyMs": 10,
+    "outputTs": {
+     "contextTime": 20.788003999999997,
+     "performanceTime": 27451.5,
+     "currentMinusContextMs": 52,
+     "nowMinusPerfTimeMs": 3.6
+    }
+   },
+   "monitor": {
+    "low": 0,
+    "jumps": 0,
+    "blocks": 2241
+   }
+  },
+  {
+   "name": "D: lead 150 ms, every 10th chunk +250 ms late",
+   "leadMs": 150,
+   "durationS": 8,
+   "lateEvery": 10,
+   "lateExtraMs": 250,
+   "chunks": 80,
+   "lateChunks": 0,
+   "droppedChunks": 8,
+   "decodeErrors": 0,
+   "decodeMs": {
+    "p50": 0.5,
+    "p95": 1.1,
+    "max": 1.5
+   },
+   "scheduleLeadMs": {
+    "p50": 139.33,
+    "p95": 140.67,
+    "max": 140.67
+   },
+   "clock": {
+    "updates": 503,
+    "stepMedianMs": 10.67,
+    "stepMaxMs": 10.67,
+    "audioVsPerfPpm": 33,
+    "outputLatencyMs": 40,
+    "baseLatencyMs": 10,
+    "outputTs": {
+     "contextTime": 27.648737,
+     "performanceTime": 34312.09999999404,
+     "currentMinusContextMs": 52.6,
+     "nowMinusPerfTimeMs": 4.3
+    }
+   },
+   "monitor": {
+    "low": 284,
+    "jumps": 15,
+    "blocks": 2991
+   }
+  },
+  {
+   "name": "E: background — lock the screen for ~10 s now, then return",
+   "leadMs": 400,
+   "durationS": 30,
+   "lateEvery": 0,
+   "lateExtraMs": 0,
+   "chunks": 300,
+   "lateChunks": 0,
+   "droppedChunks": 0,
+   "decodeErrors": 0,
+   "decodeMs": {
+    "p50": 0.5,
+    "p95": 1,
+    "max": 1.8
+   },
+   "scheduleLeadMs": {
+    "p50": 389.33,
+    "p95": 400,
+    "max": 400
+   },
+   "clock": {
+    "updates": 503,
+    "stepMedianMs": 10.67,
+    "stepMaxMs": 10.67,
+    "audioVsPerfPpm": 6,
+    "outputLatencyMs": 40,
+    "baseLatencyMs": 10,
+    "outputTs": {
+     "contextTime": 36.878547,
+     "performanceTime": 43541.90000000596,
+     "currentMinusContextMs": 52.1,
+     "nowMinusPerfTimeMs": 0.2
+    }
+   },
+   "monitor": {
+    "low": 0,
+    "jumps": 0,
+    "blocks": 11241
+   }
+  }
+ ],
+ "events": [
+  {
+   "t": 6330.7,
+   "name": "ctxStatechange",
+   "ctxState": "running",
+   "ctxTime": 0
+  }
+ ],
+ "fixturePackets": 1001,
+ "verdict": {
+  "decodesRawOpusIncrementally": true,
+  "gaplessAtLead300": true,
+  "gaplessAtLead100": true,
+  "gaplessAtLead40": true,
+  "lateChunksHandled": true,
+  "decodeMsP95": 0.9
+ }
+}
