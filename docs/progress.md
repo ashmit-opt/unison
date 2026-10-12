@@ -39,6 +39,35 @@ E2E coverage: file source with encrypted metadata; listener decode/auth error co
 - Calibration missed the first chirp (mic not flowing yet), used a too-tight window, and reported "0 ms spread" with one device heard.
 - `[hidden]` buttons were still visible (CSS `display` override) → capture button showed on phones.
 
+## Session 2 (overnight sprint, 2026-10-12) — handoff
+Baseline at start (commit b52da07): `bun run check` 68/68 + Node decode 1/1; client build OK (JS 200 KB, CSS 125 KB because fonts are inlined); Playwright 11/11.
+
+**End state (all executed in this session, not committed — owner reviews first):**
+- `bun run check`: typecheck clean, **79/79** unit + integration, Node decode 1/1.
+- `bun run build`: OK — JS 214 KB, CSS **38 KB** (was 125 KB).
+- Playwright (Chromium): **15/15 in dev, 15/15 in production mode** (`E2E_NODE_ENV=production`); suite time 4.1 → 2.3 min after closing leaked browser contexts between tests.
+- Load test (`bun run loadtest`): see 12 below.
+- Not run: Docker build (no Docker here), any real phone/iPhone, any public deployment.
+- New user-facing features: Smart Sync Doctor, Party Mode + reactions, Lock room / Remove guest.
+- Security fixes: guest requests no longer trust guest-supplied metadata/artwork; disconnected guests' peer ids can't be taken over (resume tokens); moderation is server-enforced.
+- Reliability fixes: unplayable tracks no longer stall the room; stale requests from departed guests removed; graceful shutdown; device list no longer swallows clicks / drops focus.
+
+### Backlog (prioritised; ✓ = done this session)
+1. ✓ Reliability: unplayable track (deleted Audius id, flaky node, corrupt file) left the room silent and stalled the queue → skip with toast, stop after 3 consecutive failures (+ e2e regression).
+2. ✓ Security: guest requests trusted guest-supplied title/artwork (spoofing; host browser fetching attacker-chosen URLs) → host re-resolves the track on Audius by id.
+3. ✓ Reliability: pending requests from guests who left lingered → removed on leave.
+4. ✓ Ops: graceful shutdown on SIGTERM/SIGINT (rooms closed → clients see "room ended", metrics records written).
+5. ✓ Feature: **Smart Sync Doctor** (spec §8.4 item 8) — room summary line; per-device chip expands to cause + fix + facts labelled measured / estimate / browser-reported (no sub-ms false precision); Identify (chime + vibrate + full-screen name on the device) and Re-sync (flush + clock restart + host forgets auto-sync history). Also fixed: the devices list was rebuilt several times a second, which could swallow clicks and drop keyboard focus. Tests: `doctor.test.ts` (6), `forget()` unit test, e2e expand → identify → collapse/reopen → re-sync keeps playing.
+6. ✓ Feature: **Party Mode + reactions** (spec §5.11) — host full-screen display (visualizer, now playing, QR, "N phones listening", sync health; Fullscreen API, Esc/Exit, `P` shortcut, portrait layout) and five fixed guest reactions over sealed KIND_UP frames (guest throttle 500 ms, host cap 6/5 s per guest, allowlisted values). Fixed on the way: focus return after fullscreen exit; visualizer glow clipped to a visible square on the plain party background. Tests: protocol (allowlist), limiter unit test, e2e (reaction on card → party screen with QR/count → reaction with name → exit restores focus).
+7. ✓ Moderation (spec §5.2): host "Lock room" (server refuses new devices; members reconnect) and "Remove" per device (socket closed with `removed`, resume token revoked; clear end screens for locked/removed guests). **Security fix on the way**: any client could claim a disconnected guest's peer id (no secret) → per-listener resume tokens, constant-time compared. Tests: rooms unit tests (resume token, lock/remove authz), e2e (locked join refused → member reconnects while locked → remove → unlock → join).
+8. ✓ Metrics: room records gain `reconnects` (joins now count unique devices); `/api/stats` adds a funnel (created → joined → played → real session), reconnects and failure signals (unit-tested).
+9. ✓ Performance: fonts were inlined as base64 into the render-blocking stylesheet (131 KB) → served from `public/fonts/` (7-day cache) and registered with the FontFace API; stylesheet now 37 KB. Verified in Chromium: both faces load, no CSP errors.
+10. ✓ Trust docs: [PRIVACY.md](../PRIVACY.md) (audited against the code: storage, network calls, server logging), [SECURITY.md](../SECURITY.md), [troubleshooting](troubleshooting.md), [manual device checklist](testing/manual-checklist.md). Owner must add a contact address before launch.
+11. ✓ Accessibility: keyboard walk of host + listener pages → the request-mode select had no focus indicator (fixed); modal overlays (party, big QR, request sheet) now make the page behind them inert (focus can't escape; e2e-asserted); touch screens get 40 px small buttons/quick-add/chips and a 30 px slider hit area with a 26 px thumb (verified on emulated Pixel 7: a tap 12 px off the track moves the slider). Existing: global focus ring, reduced motion, labelled icon buttons.
+12. ✓ Deployment readiness: [docs/deployment.md](deployment.md) — env table, proxy requirements, deploy checklist, operations, cost model; `bun run loadtest` (new) measured ≈ 134 kbps per listener, 1,000 listeners/200 rooms at ≈ 49 % of one core and +45 MB, 0 dropped sockets (Windows dev machine, loopback — indicative). Docker image not built (no Docker here).
+
+Feature decision (from candidates A–J): Sync Doctor (B) and Party Mode (A, with Lightweight Reactions C as its social layer) give the most user value for the effort and build on existing data/UI. One-Tap Rejoin (E) is largely present (link + saved offsets + host resume); Device Labels (G) are covered by friendly names + identify ping; Crowd Picks (D) overlaps requests; Source handoff (I) and synced visuals (F) have weak value/effort; Privacy panel (J) is folded into trust docs + Doctor.
+
 ## Session 1d (2026-10-12): tab experience, queue + guest requests, local library
 - Tab sharing: service tiles (JioSaavn, Spotify, YouTube Music, YouTube, Apple Music), picker opens on tabs, focus stays on Unison (CaptureController), live input meter, silent-tab hint with "Share again", editable "What's playing?" that updates every device, toast when sharing stops.
 - Queue (ADR-0009): host queue with play now / reorder / remove / clear / auto-advance; "+" quick-add on samples and Audius results; guests see "Up next".
@@ -80,9 +109,12 @@ E2E coverage: file source with encrypted metadata; listener decode/auth error co
 2. Deployment: choose a target (Fly.io or a VPS) and authorize the deploy and any cost.
 
 ## Next tasks (dependency order)
+Owner first: review the uncommitted diff of session 2 and commit it if happy (nothing was committed or pushed). Then work through [docs/testing/manual-checklist.md](testing/manual-checklist.md) — sections 2 (sync) and 3–4 (new features) matter most.
+
 0. Owner: real-room auto-sync check — play music with phone + laptop + old laptop; watch "Auto-sync on · hears N of M · measured spread"; listen for any hiss from the −30 dB code in quiet passages; try "Help sync" on a phone far from the host.
 1. Owner: run `experiments/ios-audio` on an iPhone (README has the HTTPS steps); commit results in `experiments/ios-audio/results/`.
 2. Owner + Claude: LAN session with real devices (`TLS_CERT/TLS_KEY`, README) → calibrate → record the §10.1 measurement → report p50/p95/max honestly in this file.
 3. If iOS scheduling misbehaves: switch the player to an AudioWorklet ring buffer behind the `Player` API (ADR-0002 consequence).
-4. After authorization: deploy (Docker/Fly), set `STATS_TOKEN`, add proxy headers, smoke test over HTTPS.
-5. Early users: share with a few friend groups; watch `/api/stats` (real sessions, calibration rate, median spread).
+4. After authorization: deploy per [docs/deployment.md](deployment.md) (Docker/Fly or VPS + Caddy), set `STATS_TOKEN`, add proxy headers, smoke test over HTTPS; add a contact address to PRIVACY.md and SECURITY.md first.
+5. Early users: share with a few friend groups; watch `/api/stats` (funnel created → joined → played → real, reconnects, failure signals, calibration rate, median spread).
+6. Candidates for the next sprint: relay reactions to all guests' screens (currently host screen + sender only); "rotate link" (new room key + room, carry the queue) for a hard removal; One-Tap Rejoin polish on flaky networks; a privacy panel in the app linking PRIVACY.md.

@@ -86,7 +86,7 @@ export function startServer(opts: ServerOptions = {}) {
       }
       const file = files.get(url.pathname);
       if (file) {
-        const headers: Record<string, string> = { ...SECURITY_HEADERS, "Cache-Control": url.pathname === "/sw.js" ? "no-cache" : "public, max-age=3600" };
+        const headers: Record<string, string> = { ...SECURITY_HEADERS, "Cache-Control": url.pathname === "/sw.js" ? "no-cache" : url.pathname.startsWith("/fonts/") ? "public, max-age=604800" : "public, max-age=3600" };
         if (url.pathname.endsWith(".webmanifest")) headers["Content-Type"] = "application/manifest+json";
         return new Response(Bun.file(file), { headers });
       }
@@ -123,6 +123,19 @@ export function startServer(opts: ServerOptions = {}) {
 }
 
 if (import.meta.main) {
-  const { server } = startServer();
-  console.log(`syncaudio listening on ${server.url}`);
+  const app = startServer();
+  console.log(`unison listening on ${app.server.url}`);
+  // Graceful shutdown (deploys, Ctrl+C): end every room — clients get "room-closed" instead of a dead socket,
+  // and each room's anonymous metrics record is written — then stop.
+  let stopping = false;
+  const shutdown = (sig: string) => {
+    if (stopping) return;
+    stopping = true;
+    const n = app.rooms.rooms.size;
+    for (const room of [...app.rooms.rooms.values()]) app.rooms.close(room);
+    console.log(`${sig}: closed ${n} room(s), shutting down`);
+    setTimeout(() => { app.stop(); process.exit(0); }, 300); // let close frames flush
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 }

@@ -21,4 +21,13 @@ export async function searchTracks(query: string): Promise<Track[]> {
     }));
 }
 
+/** Authoritative metadata for one track (used to vet guest requests). Null if missing or not streamable. */
+export async function getTrack(id: string): Promise<Track | null> {
+  const res = await fetch(`${API}/tracks?id=${encodeURIComponent(id)}&app_name=${APP}`);
+  if (!res.ok) return null;
+  const t = ((await res.json()) as { data: ApiTrack[] }).data?.[0];
+  if (!t || t.is_streamable === false) return null;
+  return { id: t.id, title: t.title, artist: t.user?.name?.trim() ?? "Unknown artist", durationS: t.duration, url: `https://audius.co${t.permalink ?? ""}`, art: t.artwork?.["480x480"] ?? t.artwork?.["150x150"], genre: t.genre };
+}
+
 export const streamUrl = (id: string) => `${API}/tracks/${encodeURIComponent(id)}/stream?app_name=${APP}`;

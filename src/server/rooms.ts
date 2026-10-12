@@ -40,7 +40,7 @@ export type Session = {
 };
 
 export type RoomRecord = {
-  v: 1; day: string; durationS: number; peakPeers: number; joins: number; played: boolean; playedS: number;
+  v: 1; day: string; durationS: number; peakPeers: number; joins: number; reconnects: number; played: boolean; playedS: number;
   sources: SourceKind[]; browsers: Record<string, number>; mobile: number; desktop: number;
   late: number; drops: number; resyncs: number; authFail: number; calibrated: boolean; spreadMs: number | null;
 };
@@ -51,13 +51,15 @@ export class Room {
   host: Session | null = null;
   listeners = new Map<number, Session>();
   nextPeer = 1;
+  locked = false;
+  resume = new Map<number, string>(); // listener peer id → token that reclaims it after a reconnect
   epoch = 0;
   lastSeq = -1;
   buffer: Buffered[] = [];
   hostGoneAt: number | null;
   emptyAt: number | null;
   stats = {
-    joins: 0, peakPeers: 0, chunks: 0, late: 0, drops: 0, resyncs: 0, authFail: 0, calibrated: false,
+    joins: 0, reconnects: 0, peakPeers: 0, chunks: 0, late: 0, drops: 0, resyncs: 0, authFail: 0, calibrated: false,
     spreadMs: null as number | null, sources: new Set<SourceKind>(), browsers: {} as Record<string, number>, mobile: 0, desktop: 0,
   };
   constructor(readonly id: string, readonly hostToken: string, readonly createdAt: number) {
@@ -140,6 +142,18 @@ export class Rooms {
         room.host?.conn.send(json({ type: "peer-status", peer: s.peer, status }));
         return;
       }
+      case "lock":
+        if (s.role !== "host") return this.bad(s);
+        room.locked = m.locked;
+        s.conn.send(json({ type: "locked", locked: room.locked }));
+        return;
+      case "remove": {
+        if (s.role !== "host") return this.bad(s);
+        const l = room.listeners.get(m.peer);
+        room.resume.delete(m.peer);
+        if (l) this.fail(l, "removed"); // the close handler runs leave()
+        return;
+      }
       case "stop":
         if (s.role !== "host" || m.epoch < room.epoch) return this.bad(s);
         room.epoch = m.epoch;
@@ -162,20 +176,28 @@ export class Rooms {
       room.hostGoneAt = null;
       this.toListeners(room, json({ type: "host", online: true }));
     } else {
+      const want = m.peer, token = want !== undefined ? room.resume.get(want) : undefined;
+      const reclaim = want !== undefined && !!token && !!m.resume && !room.listeners.has(want) && sameToken(m.resume, token);
+      if (room.locked && !reclaim) return this.fail(s, "locked");
       if (room.listeners.size >= this.limits.maxPeers) return this.fail(s, "room-full");
-      const want = m.peer;
-      s.peer = want && want < room.nextPeer && !room.listeners.has(want) ? want : room.nextPeer++;
+      if (reclaim) {
+        s.peer = want;
+        room.stats.reconnects++;
+      } else {
+        s.peer = room.nextPeer++;
+        room.resume.set(s.peer, b64urlEncode(crypto.getRandomValues(new Uint8Array(16))));
+        room.stats.joins++;
+        room.stats.browsers[s.browser] = (room.stats.browsers[s.browser] ?? 0) + 1;
+        s.mobile ? room.stats.mobile++ : room.stats.desktop++;
+      }
       room.listeners.set(s.peer, s);
-      room.stats.joins++;
-      room.stats.browsers[s.browser] = (room.stats.browsers[s.browser] ?? 0) + 1;
-      s.mobile ? room.stats.mobile++ : room.stats.desktop++;
     }
     s.room = room;
     s.role = m.role;
     s.name = m.name;
     room.emptyAt = null;
     room.stats.peakPeers = Math.max(room.stats.peakPeers, room.members);
-    s.conn.send(json({ type: "welcome", v: PROTOCOL_VERSION, peer: s.peer, role: m.role, epoch: room.epoch, hostOnline: !!room.host }));
+    s.conn.send(json({ type: "welcome", v: PROTOCOL_VERSION, peer: s.peer, role: m.role, epoch: room.epoch, hostOnline: !!room.host, locked: room.locked, resume: room.resume.get(s.peer) }));
     if (m.role === "listener") {
       const from = this.now() - this.limits.replayPastMs;
       for (const c of room.buffer) if (c.t > from) s.conn.send(c.data);
@@ -256,7 +278,7 @@ export class Rooms {
     const st = room.stats;
     this.onClosed({
       v: 1, day: new Date().toISOString().slice(0, 10), durationS: Math.round((this.now() - room.createdAt) / 1000),
-      peakPeers: st.peakPeers, joins: st.joins, played: st.chunks > 0, playedS: Math.round(st.chunks / 10),
+      peakPeers: st.peakPeers, joins: st.joins, reconnects: st.reconnects, played: st.chunks > 0, playedS: Math.round(st.chunks / 10),
       sources: [...st.sources], browsers: st.browsers, mobile: st.mobile, desktop: st.desktop,
       late: st.late, drops: st.drops, resyncs: st.resyncs, authFail: st.authFail, calibrated: st.calibrated, spreadMs: st.spreadMs,
     });

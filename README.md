@@ -8,6 +8,9 @@ Turn every phone and laptop in the room into one synchronized speaker system. A 
 - Technical spec: [docs/specs/synced-audio.md](docs/specs/synced-audio.md)
 - Decisions: [docs/architecture/decisions/](docs/architecture/decisions/)
 - Status, test results, next steps: [docs/progress.md](docs/progress.md)
+- Deployment readiness, capacity and cost model: [docs/deployment.md](docs/deployment.md)
+- Privacy notice: [PRIVACY.md](PRIVACY.md) · Security policy: [SECURITY.md](SECURITY.md) · Troubleshooting: [docs/troubleshooting.md](docs/troubleshooting.md)
+- Real-device test checklist: [docs/testing/manual-checklist.md](docs/testing/manual-checklist.md)
 
 ## Quick start
 Requires [Bun](https://bun.sh) 1.2+ (and Node 22+ for Playwright and one test).
@@ -25,6 +28,7 @@ Open it in desktop Chrome or Edge, **Create a room**, then open the room link in
 | `bun run test:e2e` | Playwright browser tests (Chromium; first run: `npx playwright install chromium`) |
 | `bun run build` | Bundle the client to `dist/` (sanity check; production serves from source) |
 | `bun run start` | Production mode (bundles the client once at startup) |
+| `bun run loadtest [rooms] [listeners/room] [seconds]` | Relay capacity check: local server + simulated clients; prints CPU, memory, per-listener bandwidth |
 
 ## Testing with real phones on your Wi-Fi
 Phones need HTTPS (WebCrypto, AudioWorklet, microphone and service workers require a secure context):
@@ -47,9 +51,10 @@ docker run -p 8080:8080 -v unison-data:/data unison
 
 Environment: `PORT`, `HOST`, `METRICS_FILE` (default `data/metrics.jsonl`), `STATS_TOKEN` (enables `GET /api/stats?token=…`), `TRUST_PROXY=1` (use `Fly-Client-IP`/`X-Forwarded-For` for rate limiting), `TLS_CERT`/`TLS_KEY` (direct HTTPS). Health check: `GET /healthz`.
 
-All rooms live in memory: a restart ends live sessions. One small VM handles many rooms; relay bandwidth (~140 kbps per listener) is the real limit.
+All rooms live in memory: a restart ends live sessions (SIGTERM closes rooms cleanly). Measured relay cost: ≈ 134 kbps (≈ 60 MB/hour) per listener, ≈ 0.05 % of a core and ≈ 40 KB RAM per listener — bandwidth is the limit. Details in [docs/deployment.md](docs/deployment.md).
 
 ## Privacy
+Full notice: [PRIVACY.md](PRIVACY.md).
 - The room key is generated in the host's browser and only travels in the link's `#fragment`, which browsers never send to servers.
 - Every audio chunk and control message is sealed with AES-256-GCM; the server only sees routing headers (room id, sequence numbers, timing).
 - The server keeps at most ~10 s of ciphertext per room in memory and never writes audio to disk.

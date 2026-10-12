@@ -67,6 +67,8 @@ Unit tests sit next to the code as `*.test.ts`.
 - Host browser generates the 32-byte room key and navigates to `/r/<room>#k=<base64url key>`; `hostToken` lives in `sessionStorage["host:<room>"]` (so a reload keeps the host role).
 - Share link = the same URL without host token. QR encodes the full URL including the fragment.
 - Limits: 32 peers per room, 2000 rooms per process.
+- Reconnect: each listener gets a random 16-byte `resume` token in its first `welcome`; a later `hello` with `peer` + matching `resume` (constant-time compare) reclaims that peer id (counted as a reconnect, not a join). Without it the device gets a new id — nobody can take over a disconnected guest's id.
+- Moderation (host only, server-enforced): `lock` → new listener hellos are refused with `locked` (members reconnect with their resume token); `remove` → that listener's socket is closed with `removed` and its resume token revoked (while locked it can't come back; unlocked, it could rejoin as a new device — the key can't be revoked without a new room). Guests' clients show a clear end screen and don't auto-reconnect.
 - Lifecycle: room is deleted when (a) no host connected for 10 min, or (b) nobody connected for 60 s, or (c) 12 h after creation. Deletion closes sockets with `room-closed` and drops the buffer.
 
 ### 5.3 Sources (one pipeline)
@@ -112,11 +114,12 @@ Everything inside binary payloads (Opus packets, track metadata, calibration com
 ### 5.10 Deployment and operations
 - Single container; `PORT` env; TLS terminated by the platform (Fly.io) or a reverse proxy (Caddy). WebSockets must be allowed through the proxy.
 - One process holds all rooms in memory → scale vertically; rooms die on restart (acceptable: sessions are transient). Health: `GET /healthz`.
-- Env: `PORT`, `METRICS_FILE` (default `data/metrics.jsonl`), `STATS_TOKEN` (enables `/api/stats`), `TRUST_PROXY=1` (use `Fly-Client-IP`/`X-Forwarded-For` for the creation rate limit).
+- Env: `PORT`, `METRICS_FILE` (default `data/metrics.jsonl`), `STATS_TOKEN` (enables `/api/stats`), `TRUST_PROXY=1` (use `Fly-Client-IP`/`X-Forwarded-For` for the creation rate limit). Full table, proxy requirements, measured capacity (`scripts/loadtest.ts`) and cost model: `docs/deployment.md`.
+- Graceful shutdown: SIGTERM/SIGINT close every room (`room-closed`, metrics written) and exit.
 - Response headers: strict CSP (§9.7), `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Permissions-Policy: microphone=(self), display-capture=(self)`.
 
 ### 5.11 UI (ADR-0008)
-Design system, screens, states and motion rules are in ADR-0008. Views: `src/client/views/{landing,host,listener,common}.ts`; helpers `src/client/ui/{dom,visualizer}.ts`. Highlights: live invite (the listener page connects before the tap and shows host name, what's playing, device count; dead rooms show "room ended" immediately), circular spectrum visualizer around cover art, source tabs (Samples · Audius · File · Tab), sample tracks (`src/client/samples.ts`, Audius ids, artwork fetched live with generated-cover fallback), big-QR overlay, per-device friendly names (`hello.name`, validated `[\p{L}\p{N} _-]{1,32}`), volume + haptics on listeners, toasts for join/leave/in-sync, keyboard shortcuts (Space, `/`), Media Session metadata. Fonts are declared in `styles.css` directly because Bun 1.2.6's CSS printer corrupts `unicode-range` and unquoted `format()` values from the @fontsource CSS.
+Design system, screens, states and motion rules are in ADR-0008. Views: `src/client/views/{landing,host,listener,common}.ts`; helpers `src/client/ui/{dom,visualizer}.ts`. Highlights: live invite (the listener page connects before the tap and shows host name, what's playing, device count; dead rooms show "room ended" immediately), circular spectrum visualizer around cover art, source tabs (Samples · Audius · File · Tab), sample tracks (`src/client/samples.ts`, Audius ids, artwork fetched live with generated-cover fallback), big-QR overlay, per-device friendly names (`hello.name`, validated `[\p{L}\p{N} _-]{1,32}`), volume + haptics on listeners, toasts for join/leave/in-sync, keyboard shortcuts (Space, `/`, `P`), Media Session metadata. **Party Mode** (`views/party.ts`, host): full-screen display for a TV/laptop (Fullscreen API when allowed, windowed otherwise) with a large visualizer, now playing, QR + "N phones listening", room sync health, and floating guest reactions; Esc/Exit returns focus to the opener; responsive (portrait stacks). **Reactions**: guests get five fixed reactions (🔥 ❤️ 🙌 🎉 😂 — no free text, nothing to moderate) sent as sealed KIND_UP `{type:"react", r}`; throttled to 1 per 500 ms on the guest and capped at 6 per 5 s per guest on the host; shown floating on the host's now-playing card or the party screen with the guest's name, and on the sender's own screen as feedback; reduced motion → no rise animation. Fonts (Inter, Space Grotesk; OFL; Latin subset) are copied from @fontsource-variable into `public/fonts/` (with licences) and registered from `main.ts` via the FontFace API: Bun 1.2.6 inlines CSS `url()` assets as base64 (stylesheet was 125 KB, render-blocking; now 37 KB), corrupts @fontsource's `unicode-range`, and can't leave `/`-absolute hrefs unresolved. `/fonts/*` is served with a 7-day cache. When updating the font package, re-copy the two files.
 
 ## 6. Protocol (version 1)
 Constant `PROTOCOL_VERSION = 1`. Bump on any incompatible change.
@@ -125,20 +128,23 @@ Constant `PROTOCOL_VERSION = 1`. Bump on any incompatible change.
 Client → server:
 | type | fields | rules |
 |---|---|---|
-| `hello` | `v:int, room:string(10), role:"host"\|"listener", hostToken?:string, peer?:int` | must be the first message, within 5 s of connect; `v` must equal server version else `error{code:"bad-version", v}` and close |
+| `hello` | `v:int, room:string(10), role:"host"\|"listener", hostToken?:string, peer?:int, resume?:string, name?:string` | must be the first message, within 5 s of connect; `v` must equal server version else `error{code:"bad-version", v}` and close |
 | `ping` | `id:int, t0:number, pair?:int, idx?:0\|1` | ≤ 20/s; pong echoes `pair`/`idx` |
 | `status` | `state, bufferMs, errMs, rate, late, drops, resyncs, authFail, rttMs, uncMs, outLatMs, offsetMs, calibrated:bool, map:"ots"\|"env"`; host adds `source?: kind`, `spreadMs?: number` | numbers clamped to sane ranges; ≤ 2/s |
 | `stop` | `epoch:int` | host only; clears buffer, broadcast |
+| `lock` | `locked:bool` | host only (§5.2); server answers `locked` |
+| `remove` | `peer:int` | host only (§5.2) |
 Server → client:
 | type | fields |
 |---|---|
-| `welcome` | `v, peer:int, role, epoch:int, hostOnline:bool` |
+| `welcome` | `v, peer:int, role, epoch:int, hostOnline:bool, locked:bool, resume?:string` (listeners) |
+| `locked` | `locked:bool` (host, after `lock`) |
 | `pong` | `id, t0, ts:number` (server monotonic ms) |
 | `peers` | `peers:[{peer, role, browser, mobile, name?}]` (to everyone on change) |
 | `peer-status` | `peer, status` (host only) |
 | `stop` | `epoch` |
 | `host` | `online:bool` (listeners) |
-| `error` | `code: bad-version\|no-room\|bad-token\|room-full\|bad-message\|replaced\|room-closed\|rate-limit, v?` |
+| `error` | `code: bad-version\|no-room\|bad-token\|room-full\|bad-message\|replaced\|room-closed\|rate-limit\|locked\|removed, v?` |
 
 ### 6.2 Binary messages (sealed, host → server → listeners, ≤ 64 KiB)
 Header (big-endian), followed by `iv(12) ‖ AES-GCM ciphertext+tag(16)`:
@@ -150,9 +156,10 @@ AAD  = utf8(room) ‖ header
 CHUNK plaintext: `u8 n | n × (u16 len | Opus packet)`. CTL plaintext: UTF-8 JSON, one of
 `{type:"meta", epoch, kind, title?, artist?, url?}` (sent at epoch start and to every newly joined peer),
 `{type:"cal-play", round, at}` (play the chirp at server time `at`), `{type:"cal-adjust", deltaMs}`,
-`{type:"pn", db}` (auto-sync code level for the receiving device, −60…−10 dB, or `null` = off; §8.4).
+`{type:"pn", db}` (auto-sync code level for the receiving device, −60…−10 dB, or `null` = off; §8.4),
+`{type:"identify"}` and `{type:"resync"}` (Sync Doctor actions, §8.4 item 8).
 
-Queue & requests (ADR-0009): CTL `{type:"queue", mode:"ask"|"auto"|"off", now?, next:[{title, artist?, art?, by?}] (≤30)}` and `{type:"request-result", ref, ok, reason?}`. Listener → host frames use kind 3 (`KIND_UP`): header `v | 3 | from u32`, payload `{type:"request", ref, audiusId, title, artist?, art?, durationS?}`; the server accepts them only from listeners whose peer id equals `from` and forwards them only to the host. CTL JSON may be up to 16 KiB.
+Queue & requests (ADR-0009): CTL `{type:"queue", mode:"ask"|"auto"|"off", now?, next:[{title, artist?, art?, by?}] (≤30)}` and `{type:"request-result", ref, ok, reason?}`. Listener → host frames use kind 3 (`KIND_UP`): header `v | 3 | from u32`, payload `{type:"request", ref, audiusId, title, artist?, art?, durationS?}` or `{type:"react", r: "fire"|"heart"|"hands"|"party"|"laugh"}`; the server accepts them only from listeners whose peer id equals `from` and forwards them only to the host. CTL JSON may be up to 16 KiB.
 
 Status (§6.1) also carries optional diagnostics: `starts, jumps, under, flushes, bgDrops, maxJumpMs, hidden` (restart causes, background skips) and, for helpers, `heard: {peerId: lagMs}` (≤ 40 entries, |lag| ≤ 2000).
 
@@ -222,11 +229,12 @@ Primary calibration method; §8.2 chirps remain as a manual fallback ("Calibrate
 5. **Control** (`AutoSyncHost`): per mic/device median of the last 3 accepted lags; entries live 4 s. A device is measurable only when its last correction is ≥ 3 s old (helpers' data ≥ 7.5 s, as their accumulations aren't reset) and its scheduler chain error ≤ 1.5 ms (slew finished). Correction = `e[i] − median(e)` when ≥ 1 ms (full step; ≤ 25 ms slews inaudibly, larger resyncs once). Measured spread = max − min of `e` over the group (held 8 s through gaps).
 6. **Levels**: per device, start at −30 dB; +3 dB (max −24) if not heard by any mic for 6 s; −3 dB (min −36) after 3 consecutive windows with peak ratio > 20 at the host mic, only while no helper is active.
 7. **UI**: host is asked for the microphone when it first plays something; status line shows how many devices are heard and the measured spread; per-device "synced"/"not heard yet". Listener card "Help sync with this microphone" (opt-in); only timing numbers leave the phone.
-8. **Limits**: needs music (silence carries no code); aligns at the microphones (two-way pairs: at the source); reverb, noisy rooms and audibility of the code are untested on real devices.
+8. **Smart Sync Doctor** (`src/client/doctor.ts`, pure + unit-tested): the host's devices card shows a room summary line and, per device, a level chip (In sync / Check / Problem) that expands to a plain-language cause + fix and the facts behind it, each labelled **measured** (acoustic or network), **estimate** (software model) or **browser-reported**; sub-millisecond values show as "<1 ms". Rule order: background/screen off → can't decrypt → not playing (late audio vs other) → ≥ 3 playback faults in the last ~65 s (dominant cause: late chunks / fell behind / clock jumps) → not heard by any mic (mentions possible Bluetooth only when the browser reports ≥ 100 ms output latency) → acoustically synced → playing → idle. Actions: **Identify** (ctl `identify`: listener plays a two-note chime, vibrates and shows its name full-screen for ~2 s), **Re-sync** (ctl `resync`: listener flushes its scheduled audio and restarts its clock estimate; the host forgets that device's auto-sync history so it is re-measured after the settle time), **How Help sync works** (explains opt-in helper mics). The list re-renders from status reports but never mid-click and keeps keyboard focus.
+9. **Limits**: needs music (silence carries no code); aligns at the microphones (two-way pairs: at the source); reverb, noisy rooms and audibility of the code are untested on real devices.
 
 ## 9. Encryption and privacy
 ### 9.1 Threat model
-Protect audio content and track metadata from the server operator, network observers and anyone without the full link. Room members (anyone holding the full URL) are trusted. Out of scope: malicious room members, traffic analysis, server denial of service.
+Protect audio content and track metadata from the server operator, network observers and anyone without the full link. Room members (anyone holding the full URL) are trusted; the host can lock the room and remove a device (§5.2), which limits access but can't revoke the key. Out of scope: malicious room members, traffic analysis, server denial of service.
 ### 9.2 Keys
 - Host generates 32 random bytes (`crypto.getRandomValues`), imports as AES-GCM 256 (non-extractable after import).
 - Transferred only in the URL fragment `#k=<base64url>`. Browsers never send fragments in HTTP requests or `Referer`. The client never sends `location.href` anywhere; analytics are server-side counts.
@@ -242,8 +250,8 @@ AES-256-GCM, 96-bit random IV per message, 128-bit tag, AAD = room id ‖ clear 
 The server holds ciphertext chunks in memory only, ≤ 100 per room, deleted on epoch change, stop or room deletion. No disk writes except the aggregate metrics file. Files and Audius tracks are decoded on the host device; nothing is uploaded except encrypted Opus chunks.
 ### 9.6 Anonymous metrics
 On room deletion the server appends one JSON line to `METRICS_FILE`:
-`{v:1, day, durationS, peakPeers, joins, played, playedS, sources[], browsers{family:n}, mobile, desktop, late, drops, resyncs, authFail, calibrated, spreadMs}`.
-No room ids, IPs, user agents, keys, titles or exact timestamps. `/api/stats?token=…` (only if `STATS_TOKEN` set) returns totals: rooms, rooms with ≥ 2 devices and ≥ 60 s played ("real sessions"), device joins, calibration rate, median spread.
+`{v:1, day, durationS, peakPeers, joins, reconnects, played, playedS, sources[], browsers{family:n}, mobile, desktop, late, drops, resyncs, authFail, calibrated, spreadMs}`.
+No room ids, IPs, user agents, keys, titles or exact timestamps. `/api/stats?token=…` (only if `STATS_TOKEN` set) returns totals: rooms, rooms with ≥ 2 devices and ≥ 60 s played ("real sessions"), funnel (created → second device joined → played → real), device joins, reconnects, failure signals (summed late/drops/resyncs, rooms with decryption failures), calibration rate, median spread.
 ### 9.7 Web hardening
 CSP (meta tag in the HTML): `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://api.audius.co; media-src 'self' blob: https:; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'none'`. No third-party scripts. Other responses carry `Referrer-Policy`, `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Permissions-Policy`. Known gap: Bun HTML-import routes can't set response headers, so the HTML document itself has no `X-Frame-Options` / `frame-ancestors` (not settable via meta); the deployment proxy adds them (README).
 

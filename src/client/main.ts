@@ -11,6 +11,13 @@ import { listenerGate } from "./views/listener.ts";
 for (const [rel, href] of [["manifest", "/manifest.webmanifest"], ["icon", "/icons/icon-192.png"], ["apple-touch-icon", "/icons/apple-touch-icon.png"]]) {
   document.head.append(Object.assign(document.createElement("link"), { rel, href }));
 }
+// Fonts (OFL, Latin subset, licences in public/fonts/). From JS too: in styles.css Bun inlined them as base64,
+// making the render-blocking stylesheet 125 KB. Here they load alongside the first render (font-display: swap).
+for (const [family, file, weight] of [["Inter Variable", "inter-latin-wght", "100 900"], ["Space Grotesk Variable", "space-grotesk-latin-wght", "300 700"]]) {
+  const f = new FontFace(family, `url(/fonts/${file}.woff2) format("woff2")`, { weight, display: "swap" });
+  document.fonts.add(f);
+  f.load().catch(() => {}); // offline before first visit → system fonts
+}
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 document.body.insertAdjacentHTML("afterbegin", `<div class="ambient" aria-hidden="true"></div>`);
 

@@ -1,6 +1,6 @@
 // Pieces shared by every view: app shell, audio unlock, wake lock, full-screen states, debug hook.
 import { SAMPLE_RATE, type ErrorCode } from "../../shared/protocol.ts";
-import { esc, ic } from "../ui/dom.ts";
+import { esc, ic, setInert } from "../ui/dom.ts";
 
 export const app = () => document.getElementById("app")!;
 export const debug: Record<string, unknown> = ((window as unknown as { __unison: Record<string, unknown> }).__unison ??= {});
@@ -41,10 +41,14 @@ const FATAL: Record<string, [string, string]> = {
   "bad-token": ["Couldn't resume hosting", "This room can only be hosted from the tab that created it."],
   "room-full": ["This room is full", "A room holds up to 32 devices."],
   "replaced": ["Hosting moved to another tab", "This room is now being hosted from somewhere else."],
+  "locked": ["This room is locked", "The host isn't letting new devices in right now. Ask them to unlock it, then try again."],
+  "removed": ["You were removed from the room", "The host disconnected this device."],
 };
 
 /** Full-screen end state with a way forward. */
-export function stateScreen(title: string, body: string, glyph: "alert" | "offline" = "alert", action?: { label: string; href?: string; onClick?: () => void }) {
+export function stateScreen(title: string, body: string, glyph: "alert" | "offline" | "lock" = "alert", action?: { label: string; href?: string; onClick?: () => void }) {
+  document.querySelectorAll(".overlay, .party, .sheet, .scrim").forEach((e) => e.remove()); // e.g. the room ended under the big QR
+  setInert(false);
   shell("", `<main class="state"><div class="inner">
     <div class="glyph">${ic(glyph, 28)}</div>
     <h1>${esc(title)}</h1>
@@ -56,7 +60,9 @@ export function stateScreen(title: string, body: string, glyph: "alert" | "offli
 
 export function fatal(code: ErrorCode) {
   const [title, body] = FATAL[code] ?? ["Something went wrong", code];
-  if (code === "bad-version") {
+  if (code === "locked") {
+    stateScreen(title, body, "lock", { label: "Try again", onClick: () => location.reload() });
+  } else if (code === "bad-version") {
     stateScreen(title, body, "alert", { label: "Reload", onClick: async () => { await (await navigator.serviceWorker?.getRegistration())?.update(); location.reload(); } });
   } else {
     stateScreen(title, body, "alert", { label: "Host your own room", href: "/" });

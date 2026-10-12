@@ -19,7 +19,7 @@ The owner wants a polished, memorable product UI. Stack stays vanilla TypeScript
 
 ## Decision
 - Views split into `src/client/views/{landing,host,listener}.ts`, small DOM/icon/toast helpers in `src/client/ui/`, canvas visualizer `src/client/ui/visualizer.ts`. Logic modules unchanged.
-- Icons: `lucide` (ISC), imported per icon. Fonts: `@fontsource-variable/*`.
+- Icons: `lucide` (ISC), imported per icon. Fonts: `@fontsource-variable/*` (the two Latin woff2 files are copied to `public/fonts/` and loaded with the FontFace API — see spec §5.11).
 - Sample tracks: curated Audius ids in `src/client/samples.ts`, metadata/artwork fetched live (bulk endpoint), hidden if unavailable.
 
 ## Consequences

@@ -23,7 +23,13 @@ export function summarize(recs: RoomRecord[]) {
   return {
     rooms: recs.length,
     realSessions: real.length,
+    // Funnel: created → a second device joined → audio played → real session.
+    funnel: { created: recs.length, joined: recs.filter((r) => r.peakPeers >= 2).length, played: recs.filter((r) => r.played).length, real: real.length },
     deviceJoins: recs.reduce((n, r) => n + r.joins, 0),
+    reconnects: recs.reduce((n, r) => n + (r.reconnects ?? 0), 0), // older records predate the field
+    // Failure signals (summed device counters): late chunks, drops, playback resyncs; rooms where decryption failed.
+    glitches: { late: recs.reduce((n, r) => n + r.late, 0), drops: recs.reduce((n, r) => n + r.drops, 0), resyncs: recs.reduce((n, r) => n + r.resyncs, 0) },
+    authFailRooms: recs.filter((r) => r.authFail > 0).length,
     calibratedRooms: recs.filter((r) => r.calibrated).length,
     medianSpreadMs: spreads.length ? spreads[spreads.length >> 1] : null,
     sources: count("sources"),

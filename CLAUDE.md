@@ -46,4 +46,6 @@ architecture implemented; every supported source works end-to-end within documen
 - `bun run check` — typecheck + unit tests
 - `bun run test:e2e` — Playwright browser tests
 - `bun run build` — client bundle check; `bun run start` — production mode (runs from source; see spec §2)
-- Bun 1.2.6 quirks (verified): runtime corrupts `opus-decoder` WASM (that test runs under Node); bundling server+HTML crashes; run Playwright via Node, not Bun.
+- `bun run loadtest [rooms] [listeners/room] [seconds]` — relay capacity check (docs/deployment.md)
+- Bun 1.2.6 quirks (verified): runtime corrupts `opus-decoder` WASM (that test runs under Node); bundling server+HTML crashes; run Playwright via Node, not Bun; the HTML/CSS bundler resolves every `href`/`url()` (absolute `/public` paths fail) and inlines CSS assets as base64 — add public/ assets from JS (see `main.ts`: manifest, icons, fonts via FontFace).
+- E2E tests: create pages with `newPage(browser)` in room.e2e.ts so contexts are closed after each test.

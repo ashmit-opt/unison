@@ -1,13 +1,14 @@
 // Listener: a live invite, one tap to join, then trust that it's in sync (ADR-0008, spec §5, §8.4).
 import { importRoomKey, open, seal } from "../../shared/crypto.ts";
-import { KIND_CTL, parseBinary, parseCtl, upHeader, type QueueView, type RequestMode, type SourceKind, type Up } from "../../shared/protocol.ts";
+import { KIND_CTL, parseBinary, parseCtl, REACTIONS, upHeader, type QueueView, type Reaction, type RequestMode, type SourceKind, type Up } from "../../shared/protocol.ts";
 import { searchTracks, type Track } from "../audius.ts";
 import { loadSamples } from "../samples.ts";
 import { MicListener, type Lag } from "../autosync.ts";
 import { Connection } from "../net.ts";
 import { Player } from "../player.ts";
-import { $, coverStyle, esc, fmtTime, ic, myName, toast } from "../ui/dom.ts";
+import { $, coverStyle, esc, fmtTime, ic, myName, setInert, toast } from "../ui/dom.ts";
 import { Visualizer } from "../ui/visualizer.ts";
+import { EMOJI, floatReaction, REACTION_LABEL } from "../ui/reactions.ts";
 import { audioContext, debug, fatal, fmtMs, keepAwake, shell } from "./common.ts";
 
 type Meta = { title?: string; artist?: string; kind?: SourceKind; art?: string };
@@ -121,6 +122,7 @@ async function startListener(room: string, keyBytes: Uint8Array, conn: Connectio
       <p class="status-line muted" id="st" aria-live="polite">Connecting…</p>
       <h1 class="title" id="title">Waiting for music</h1>
       <p class="muted" id="np"></p>
+      <div class="reacts" id="reacts" role="group" aria-label="Send a reaction to the room">${REACTIONS.map((r) => `<button class="react" data-r="${r}" aria-label="${REACTION_LABEL[r]}" title="${REACTION_LABEL[r]}">${EMOJI[r]}</button>`).join("")}</div>
       <button class="btn btn-sm" id="reqBtn" style="margin-top:8px">${ic("send", 15)}<span id="reqLbl">Request a song</span></button>
       <div class="upnext" id="upnext" hidden><p class="eyebrow">Up next</p><ul class="list" id="upList" style="margin:0"></ul></div>
       <div class="volume"><span aria-hidden="true">${ic("speaker", 18)}</span><input type="range" class="range" id="vol" min="0" max="150" value="100" aria-label="Volume on this device"><b id="volVal">100%</b></div>
@@ -140,7 +142,8 @@ async function startListener(room: string, keyBytes: Uint8Array, conn: Connectio
         </div>
       </details>
       <a class="btn" href="/" style="margin-top:8px">Host your own room</a>
-    </div></main>`);
+    </div></main>
+    <div class="rx-layer rx-fixed" id="rx" aria-hidden="true"></div>`);
   const vt = (document as Document & { startViewTransition?: (cb: () => void) => { updateCallbackDone: Promise<void> } }).startViewTransition;
   if (vt) await vt.call(document, go).updateCallbackDone; else go();
 
@@ -216,8 +219,22 @@ async function startListener(room: string, keyBytes: Uint8Array, conn: Connectio
     else if (c.type === "cal-adjust") { player.offsetMs += c.deltaMs; player.calibrated = true; routeChanged = false; save(); }
     else if (c.type === "pn") player.pn = c.db === null || conn.peer === undefined ? null : { id: conn.peer, db: c.db };
     else if (c.type === "queue") { reqMode = c.mode; upNext = c.next; renderUpNext(); }
+    else if (c.type === "identify") identify();
+    else if (c.type === "resync") { player.resync(); conn.resyncClock(); toast("Re-syncing this device…"); }
     else if (c.type === "request-result") toast(c.ok ? c.reason ?? "Added to the queue" : c.reason ?? "The host passed on this one", c.ok ? "ok" : "warn");
     update();
+  };
+
+  // Sync Doctor "Identify": chime, vibrate and flash this device's name so people can find it.
+  const identify = () => {
+    player.chime();
+    navigator.vibrate?.([60, 80, 60]);
+    const ov = document.createElement("div");
+    ov.className = "identify";
+    ov.setAttribute("role", "status");
+    ov.innerHTML = `<div><p class="eyebrow">The host is looking for</p><h2>${esc(conn.name ?? "this device")}</h2><p class="muted">That's you 👋</p></div>`;
+    document.body.append(ov);
+    setTimeout(() => { ov.classList.add("out"); setTimeout(() => ov.remove(), 400); }, 2200);
   };
 
   // ---- up next + song requests ----
@@ -229,10 +246,22 @@ async function startListener(room: string, keyBytes: Uint8Array, conn: Connectio
     $<HTMLButtonElement>("reqBtn").disabled = reqMode === "off";
     $("reqLbl").textContent = reqMode === "off" ? "Requests are off" : reqMode === "auto" ? "Add a song" : "Request a song";
   };
-  const sendRequest = async (t: Track) => {
-    if (conn.peer === undefined) return;
-    const up: Up = { type: "request", ref: crypto.randomUUID(), audiusId: t.id, title: t.title, artist: t.artist, art: t.art, durationS: t.durationS };
+  const sendUp = async (up: Up) => {
+    if (conn.peer === undefined) return false;
     conn.sendBinary(await seal(key, room, upHeader(conn.peer), new TextEncoder().encode(JSON.stringify(up))));
+    return true;
+  };
+  // Reactions: only the host's screen shows them to the room; we float our own as feedback.
+  let lastReact = 0;
+  $("reacts").onclick = (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLElement>("[data-r]");
+    if (!b || performance.now() - lastReact < 500) return; // host also rate-limits per guest
+    lastReact = performance.now();
+    const r = b.dataset.r as Reaction;
+    void sendUp({ type: "react", r }).then((ok) => { if (!ok) return; floatReaction($("rx"), r); navigator.vibrate?.(10); });
+  };
+  const sendRequest = async (t: Track) => {
+    if (!(await sendUp({ type: "request", ref: crypto.randomUUID(), audiusId: t.id, title: t.title, artist: t.artist, art: t.art, durationS: t.durationS }))) return;
     myRequests.add(t.id);
     toast(reqMode === "auto" ? `Adding “${t.title}”…` : `Requested “${t.title}” — waiting for the host`);
   };
@@ -246,10 +275,11 @@ async function startListener(room: string, keyBytes: Uint8Array, conn: Connectio
     sheet.innerHTML = `<div class="sheet-head"><h2>${reqMode === "auto" ? "Add a song" : "Request a song"}</h2><button class="btn btn-ghost btn-icon btn-sm" id="sheetClose" aria-label="Close">${ic("x", 18)}</button></div>
       <form id="sheetForm" role="search"><label class="field">${ic("search", 18)}<input type="search" id="sheetQ" placeholder="Search Audius" aria-label="Search Audius"><button class="btn btn-primary btn-sm">Search</button></label></form>
       <ul class="list" id="sheetList"><li class="empty">Loading picks…</li></ul>`;
-    const close = () => { scrim.remove(); sheet.remove(); removeEventListener("keydown", onKey); $("reqBtn").focus(); };
+    const close = () => { setInert(false); scrim.remove(); sheet.remove(); removeEventListener("keydown", onKey); $("reqBtn").focus(); };
     const onKey = (e: Event) => { if ((e as KeyboardEvent).key === "Escape") close(); };
     scrim.onclick = close;
     document.body.append(scrim, sheet);
+    setInert(true);
     addEventListener("keydown", onKey);
     sheet.querySelector<HTMLButtonElement>("#sheetClose")!.onclick = close;
     const list = sheet.querySelector<HTMLUListElement>("#sheetList")!;

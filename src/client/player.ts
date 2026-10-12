@@ -189,6 +189,24 @@ export class Player {
     });
   }
 
+  /** Sync Doctor "Identify": a short two-note chime right now (not synchronized — it's for finding the device). */
+  chime() {
+    const sr = SAMPLE_RATE, n = Math.round(sr * 0.5), buf = this.ctx.createBuffer(1, n, sr), d = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) {
+      const t = i / sr, f = t < 0.18 ? 880 : 1318.5, env = Math.min(1, t / 0.005) * Math.exp(-(t < 0.18 ? t : t - 0.18) * 9);
+      d[i] = 0.45 * env * Math.sin(2 * Math.PI * f * t);
+    }
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(this.out);
+    src.start();
+  }
+
+  /** Sync Doctor "Re-sync": drop scheduled audio so the next chunk restarts the chain cleanly. */
+  resync() {
+    this.enqueue(async () => { this.flush(); });
+  }
+
   /** Calibration: emit the chirp at server time `at`, through the same timing path as audio. */
   playChirp(at: number): boolean {
     if (!this.clock.ready) return false;

@@ -66,11 +66,15 @@ test("late join replays future chunks; reconnect resumes with the same peer id",
   const late = await client();
   hello(late, room, "listener");
   await late.wait(() => late.bin.length === 3);
-  const peer = (late.text.find((m) => m.type === "welcome") as { peer: number }).peer;
+  const { peer, resume } = late.text.find((m) => m.type === "welcome") as { peer: number; resume: string };
   late.ws.close();
   await Bun.sleep(50);
+  const imposter = await client();
+  hello(imposter, room, "listener", { peer }); // no resume token → a new id, not someone else's
+  await imposter.wait(() => imposter.text.some((m) => m.type === "welcome"));
+  expect((imposter.text.find((m) => m.type === "welcome") as { peer: number }).peer).not.toBe(peer);
   const again = await client();
-  hello(again, room, "listener", { peer });
+  hello(again, room, "listener", { peer, resume });
   await again.wait(() => again.bin.length === 3);
   expect((again.text.find((m) => m.type === "welcome") as { peer: number }).peer).toBe(peer);
 });
@@ -105,6 +109,8 @@ test("static files: allowlisted, security headers, no traversal", async () => {
   expect(sw.status).toBe(200);
   expect(sw.headers.get("referrer-policy")).toBe("no-referrer");
   expect((await fetch(`${base}/manifest.webmanifest`)).headers.get("content-type")).toContain("manifest+json");
+  const font = await fetch(`${base}/fonts/inter-latin-wght.woff2`);
+  expect([font.status, font.headers.get("content-type"), font.headers.get("cache-control")]).toEqual([200, "font/woff2", "public, max-age=604800"]);
   expect((await fetch(`${base}/..%2Fpackage.json`)).status).toBe(404);
   expect((await fetch(`${base}/healthz`)).status).toBe(200);
 });

@@ -1,18 +1,21 @@
 // Host: get sound playing and devices joined (ADR-0008, spec §5, §8).
 import { renderSVG } from "uqr";
 import { b64urlEncode, importRoomKey, open } from "../../shared/crypto.ts";
-import { KIND_UP, parseBinary, parseUp, type PeerInfo, type RequestMode, type SourceKind, type Status, type Up } from "../../shared/protocol.ts";
-import { searchTracks, streamUrl, type Track } from "../audius.ts";
+import { KIND_UP, parseBinary, parseUp, type PeerInfo, type Reaction, type RequestMode, type SongRequest, type SourceKind, type Status } from "../../shared/protocol.ts";
+import { getTrack, searchTracks, streamUrl, type Track } from "../audius.ts";
 import { AutoSyncHost, MicListener } from "../autosync.ts";
 import { calibrate, type Target } from "../calibrate.ts";
+import { diagnose, summarize, type Action, type Diagnosis, type Level } from "../doctor.ts";
 import { Host, UserError, canCapture, canHost } from "../host.ts";
 import { Connection } from "../net.ts";
 import { Player } from "../player.ts";
 import { library, trackTitle, type Playlist } from "../library.ts";
 import { Queue, newId, type QItem } from "../queue.ts";
 import { loadSamples } from "../samples.ts";
-import { $, coverStyle, esc, fmtTime, ic, myName, toast } from "../ui/dom.ts";
+import { $, coverStyle, esc, fmtTime, ic, myName, setInert, toast } from "../ui/dom.ts";
 import { Visualizer } from "../ui/visualizer.ts";
+import { floatReaction, reactionLimiter } from "../ui/reactions.ts";
+import { openParty, type Party } from "./party.ts";
 import { debug, fatal, fmtMs, keepAwake, shell } from "./common.ts";
 
 type Tab = "samples" | "audius" | "file" | "tab";
@@ -73,6 +76,7 @@ export async function startHost(room: string, keyBytes: Uint8Array, token: strin
             <div class="transport">
               <button class="btn btn-primary btn-round" id="pp" hidden aria-label="Pause">${ic("pause", 22)}</button>
               <button class="btn" id="stop" disabled>${ic("stop", 16)}Stop</button>
+              <button class="btn btn-ghost" id="partyBtn" title="Full-screen display for a TV or laptop (P)">${ic("sparkles", 16)}Party mode</button>
               <label class="switch"><input type="checkbox" id="localOn" checked>Play here too</label>
             </div>
             <p class="err-line" id="hostErr" role="alert" style="margin-top:12px"></p>
@@ -152,9 +156,11 @@ export async function startHost(room: string, keyBytes: Uint8Array, token: strin
               <div class="row"><button class="btn btn-sm" id="copy">${ic("copy", 14)}Copy link</button><button class="btn btn-sm" id="share" hidden>${ic("share", 14)}Share</button><button class="btn btn-sm btn-ghost" id="bigQr">${ic("users", 14)}Show big</button></div>
             </div>
           </div>
+          <div class="lock-row"><label class="switch"><input type="checkbox" id="lockRoom">Lock room</label><span class="small faint" id="lockHint">Anyone with the link can join.</span></div>
         </section>
         <section class="card" aria-label="Devices and sync">
-          <h2 class="card-title">${ic("users", 16)}Devices<span class="chip end" id="count">1</span></h2>
+          <h2 class="card-title">${ic("users", 16)}Devices &amp; sync<span class="chip end" id="count">1</span></h2>
+          <p class="health" id="health" aria-live="polite"></p>
           <div class="sync-meter">
             <div><div class="big" id="spread">—</div><div class="label" id="autosync" aria-live="polite"></div></div>
             <span class="chip" id="asChip">${ic("zap", 12)}Auto-sync</span>
@@ -165,6 +171,7 @@ export async function startHost(room: string, keyBytes: Uint8Array, token: strin
             <button class="btn btn-sm" id="cal">${ic("radio", 14)}Calibrate with chirps</button>
           </div>
           <p class="small faint" id="calmsg" aria-live="polite" style="margin-top:12px"></p>
+          <div class="rx-layer" id="rx" aria-hidden="true"></div>
           <p class="note" id="calhint" hidden style="margin-top:12px">${ic("alert", 16)}<span>Not synced yet — devices may sound out of step. Turn on auto-sync, or stop the music and calibrate with chirps.</span></p>
         </section>
       </aside>
@@ -181,10 +188,11 @@ export async function startHost(room: string, keyBytes: Uint8Array, token: strin
     ov.innerHTML = `<div class="overlay-inner"><p class="eyebrow">Point a phone camera here</p><h2>Scan to join the room</h2>
       <div class="qr qr-big">${renderSVG(link, { border: 1 })}</div><p class="muted small">Then tap “Tap to join”. Anyone with this code can listen.</p>
       <button class="btn" id="closeQr">Done</button></div>`;
-    const close = () => { ov.classList.add("out"); setTimeout(() => ov.remove(), 200); window.removeEventListener("keydown", onKey); $("bigQr").focus(); };
+    const close = () => { setInert(false); ov.classList.add("out"); setTimeout(() => ov.remove(), 200); window.removeEventListener("keydown", onKey); $("bigQr").focus(); };
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
     ov.onclick = (e) => { if (e.target === ov) close(); };
     document.body.append(ov);
+    setInert(true);
     ov.querySelector<HTMLButtonElement>("#closeQr")!.onclick = close;
     ov.querySelector<HTMLButtonElement>("#closeQr")!.focus();
     window.addEventListener("keydown", onKey);
@@ -217,32 +225,98 @@ export async function startHost(room: string, keyBytes: Uint8Array, token: strin
 
   // ---- devices ----
   const seen = new Set<number>();
-  const deviceRow = (id: number, name: string, mobile: boolean, browser: string, s: Status | undefined, isHost: boolean) => {
+  // ---- moderation: lock the room (server refuses new devices), remove a guest ----
+  let locked = false;
+  const removed = new Set<number>(); // so "X left" isn't toasted after we removed them
+  const setLocked = (on: boolean) => {
+    locked = on;
+    $<HTMLInputElement>("lockRoom").checked = on;
+    $("lockHint").textContent = on ? "Locked — no new devices can join. Guests already here can reconnect." : "Anyone with the link can join.";
+    document.querySelector(".invite")?.classList.toggle("locked", on);
+    renderNow();
+  };
+  $<HTMLInputElement>("lockRoom").onchange = (e) => conn.send({ type: "lock", locked: (e.target as HTMLInputElement).checked });
+
+  // ---- Smart Sync Doctor: per-device diagnosis (src/client/doctor.ts) ----
+  const expanded = new Set<number>();
+  type G = { t: number; drops: number; jumps: number; under: number; flushes: number };
+  const gHist = new Map<number, G[]>();
+  const glitchTotals = (st: Status): Omit<G, "t"> => ({ drops: st.drops, jumps: st.jumps ?? 0, under: st.under ?? 0, flushes: st.flushes ?? 0 });
+  const noteStatus = (id: number, st: Status) => {
+    const h = [...(gHist.get(id) ?? []), { t: performance.now(), ...glitchTotals(st) }].filter((g) => performance.now() - g.t < 65_000);
+    gHist.set(id, h);
+  };
+  const recentOf = (id: number) => {
+    const h = gHist.get(id) ?? [];
+    if (h.length < 2) return { recentGlitches: 0, recent: { drops: 0, jumps: 0, under: 0 } };
+    const a = h[0], b = h[h.length - 1], d = (k: keyof Omit<G, "t">) => Math.max(0, b[k] - a[k]);
+    return { recentGlitches: d("drops") + d("jumps") + d("under") + d("flushes"), recent: { drops: d("drops"), jumps: d("jumps"), under: d("under") } };
+  };
+  const diagnoseDevice = (id: number, st: Status | undefined): Diagnosis => diagnose(st, {
+    hostPlaying: !!host?.kind, autoSync: autoSync === "on", heard: sync.heardIds.has(id), ...recentOf(id),
+  });
+  const LEVEL_CHIP: Record<Level, string> = { good: "chip-ok", warn: "chip-warn", bad: "chip-bad", idle: "" };
+  const LEVEL_ICON: Record<Level, "check" | "alert" | "refresh" | "zap"> = { good: "check", warn: "refresh", bad: "alert", idle: "zap" };
+  const SOURCE_LABEL_FACT = { measured: "measured", estimate: "estimate", browser: "browser-reported" } as const;
+  const ACTION_LABEL: Record<Action, string> = { identify: "Identify", resync: "Re-sync", "help-sync": "How Help sync works" };
+  const deviceRow = (id: number, name: string, mobile: boolean, browser: string, st: Status | undefined, isHost: boolean) => {
     const fresh = !seen.has(id);
     seen.add(id);
-    const playing = s?.state === "playing";
-    const heard = sync.heardIds.has(id);
-    const glitches = !s ? 0 : s.jumps === undefined ? s.drops + s.late + Math.max(0, s.resyncs - 1) : s.drops + (s.jumps ?? 0) + (s.under ?? 0) + (s.flushes ?? 0);
-    const chip = !s ? `<span class="chip">Joining…</span>`
-      : s.hidden ? `<span class="chip chip-warn">${ic("alert", 12)}In background</span>`
-      : autoSync === "on" && playing && !heard && !s.calibrated ? `<span class="chip">Listening…</span>`
-      : s.calibrated ? `<span class="chip chip-ok">${ic("check", 12)}In sync</span>`
-      : playing ? `<span class="chip chip-warn">Not synced</span>` : `<span class="chip">${esc(s.state)}</span>`;
-    const why = !s ? "" : [
-      glitches ? `${glitches} glitch${glitches > 1 ? "es" : ""}:` : "",
-      s.drops ? `${s.drops} late chunk${s.drops > 1 ? "s" : ""} skipped` : "",
-      s.jumps ? `${s.jumps} timing jump${s.jumps > 1 ? "s" : ""} (max ${fmtMs(s.maxJumpMs ?? 0)})` : "",
-      s.under ? `fell behind ${s.under}×` : "",
-      s.flushes ? `${s.flushes} big reset${s.flushes > 1 ? "s" : ""}` : "",
-      s.bgDrops ? `${s.bgDrops} skipped in background` : "",
-    ].filter(Boolean).join(" ");
-    const sub = [isHost ? "This device" : browser, s?.calibrated ? `offset ${fmtMs(s.offsetMs)}` : "", s ? `rtt ${fmtMs(s.rttMs)}` : "", s?.heard ? "helping sync" : ""].filter(Boolean).join(" · ");
-    return `<li class="device${fresh ? " new" : ""}">
-      <div class="av ${playing ? "on" : ""}">${ic(mobile ? "phone" : "laptop", 18)}</div>
+    const d = diagnoseDevice(id, st), open = expanded.has(id);
+    const sub = [isHost ? "This device" : browser, st?.heard ? "helping sync" : "", d.level !== "good" && d.level !== "idle" ? d.title : ""].filter(Boolean).join(" · ");
+    return `<li class="device${fresh ? " new" : ""} lvl-${d.level}">
+      <div class="av ${st?.state === "playing" ? "on" : ""}">${ic(mobile ? "phone" : "laptop", 18)}</div>
       <div style="min-width:0"><div class="n">${esc(name)}</div><div class="s">${esc(sub)}</div></div>
-      ${chip}
-      <div class="detail">${esc(why)}</div>
+      <button class="chip ${LEVEL_CHIP[d.level]} chip-btn" data-expand="${id}" aria-expanded="${open}" aria-controls="doc-${id}" title="Sync details">${ic(LEVEL_ICON[d.level], 12)}${esc(d.level === "good" ? "In sync" : d.level === "idle" ? d.title : d.level === "bad" ? "Problem" : "Check")}${ic("chevron", 12)}</button>
+      <div class="doctor" id="doc-${id}" ${open ? "" : "hidden"}>
+        <p class="doc-title">${esc(d.title)}</p>
+        <p class="doc-detail">${esc(d.detail)}</p>
+        ${d.facts.length ? `<dl class="facts">${d.facts.map((f) => `<div><dt>${esc(f.label)}</dt><dd>${esc(f.value)} <span class="src src-${f.source}">${SOURCE_LABEL_FACT[f.source]}</span></dd></div>`).join("")}</dl>` : ""}
+        <div class="doc-actions">${d.actions.map((a) => `<button class="btn btn-sm${a === "resync" ? "" : " btn-ghost"}" data-act="${a}" data-id="${id}">${ic(a === "identify" ? "speaker" : a === "resync" ? "refresh" : "mic", 14)}${ACTION_LABEL[a]}</button>`).join("")}${isHost ? "" : `<button class="btn btn-sm btn-ghost btn-danger" data-act="remove" data-id="${id}">${ic("x", 14)}Remove</button>`}</div>
+      </div>
     </li>`;
+  };
+  // The list re-renders several times a second (status reports). Never swap it mid-click (a click whose
+  // mousedown and mouseup land on different elements is lost) and keep keyboard focus on the same control.
+  let pointerDown = false, devicesHtml = "";
+  $("devices").onpointerdown = () => { pointerDown = true; };
+  $("devices").onpointerup = $("devices").onpointercancel = $("devices").onpointerleave = () => { pointerDown = false; };
+  const renderDevices = (html: string) => {
+    const list = $("devices");
+    if (pointerDown || html === devicesHtml) return;
+    const f = document.activeElement instanceof HTMLElement && list.contains(document.activeElement) ? document.activeElement : null;
+    const key = f?.dataset.expand !== undefined ? `[data-expand="${f.dataset.expand}"]` : f?.dataset.act ? `[data-act="${f.dataset.act}"][data-id="${f.dataset.id}"]` : null;
+    list.innerHTML = devicesHtml = html;
+    if (key) list.querySelector<HTMLElement>(key)?.focus();
+  };
+  $("devices").onclick = (e) => {
+    const t = (e.target as HTMLElement).closest<HTMLElement>("[data-expand],[data-act]");
+    if (!t) return;
+    if (t.dataset.expand !== undefined) {
+      const id = Number(t.dataset.expand);
+      expanded.has(id) ? expanded.delete(id) : expanded.add(id);
+      update();
+      return;
+    }
+    const id = Number(t.dataset.id), act = t.dataset.act as Action | "remove";
+    if (act === "remove") {
+      const name = peers.get(id)?.info.name ?? "That device";
+      removed.add(id);
+      expanded.delete(id);
+      conn.send({ type: "remove", peer: id });
+      toast(locked ? `Removed ${name}` : `Removed ${name} — lock the room to keep them from rejoining`, "ok");
+      return;
+    }
+    if (act === "identify") {
+      if (id === 0) { local.chime(); toast("Chiming on this device"); } else { host?.sendCtl(id, { type: "identify" }); toast(`Chiming on ${peers.get(id)?.info.name ?? "that device"} — look for its screen`); }
+    } else if (act === "resync") {
+      if (id === 0) { local.resync(); conn.resyncClock(); } else host?.sendCtl(id, { type: "resync" });
+      sync.forget(id);
+      gHist.delete(id);
+      toast("Re-syncing — it takes a few seconds to settle", "ok");
+    } else if (act === "help-sync") {
+      toast("On a phone near that device: open Sync settings → Help sync. Its mic then helps line up the speakers around it.", "info");
+    }
   };
 
   // ---- now playing ----
@@ -270,8 +344,14 @@ export async function startHost(room: string, keyBytes: Uint8Array, token: strin
     $("sysnote").hidden = kind !== "system";
     $("liveTab").hidden = !(kind === "tab" || kind === "system");
     document.querySelectorAll<HTMLElement>(".track").forEach((t) => t.classList.toggle("active", t.dataset.id === activeTrack && kind === "audius"));
+    party?.update({
+      playing: $("viz").classList.contains("playing"), label: kind ? `Now playing · ${SOURCE_LABEL[kind]}` : "Party mode", title: kind ? $("npTitle").textContent ?? "" : "Waiting for music",
+      artist: kind ? m.artist ?? "" : "", artHtml: $("art").innerHTML, listeners: listenerPeers().length, health: roomHealth(), locked,
+    });
   };
 
+  const listenerPeers = () => [...peers.values()].filter((p) => p.info.role === "listener");
+  const roomHealth = () => summarize([diagnoseDevice(0, local.status()).level, ...listenerPeers().map((p) => diagnoseDevice(p.info.peer, p.status).level)]);
   const update = () => {
     if (!document.getElementById("count")) return; // view replaced (e.g. room ended)
     const listeners = [...peers.values()].filter((p) => p.info.role === "listener");
@@ -279,9 +359,12 @@ export async function startHost(room: string, keyBytes: Uint8Array, token: strin
     $("count").textContent = String(n);
     $("liveChip").className = `chip ${conn.connected ? "chip-ok" : "chip-warn"}`;
     $("liveChip").innerHTML = `<span class="dot ${conn.connected ? "live" : ""}"></span>${conn.connected ? `Live · ${n} device${n > 1 ? "s" : ""}` : "Reconnecting"}`;
-    $("devices").innerHTML = deviceRow(0, `${myName()} (you)`, false, "", local.status(), true)
+    renderDevices(deviceRow(0, `${myName()} (you)`, false, "", local.status(), true)
       + listeners.map((p) => deviceRow(p.info.peer, p.info.name ?? `Device ${p.info.peer}`, p.info.mobile, p.info.browser, p.status, false)).join("")
-      + (listeners.length ? "" : `<li class="device-empty"><span class="pulse-dots" aria-hidden="true"><i></i><i></i><i></i></span>Waiting for friends — scan the QR code with any phone to add it as a speaker.</li>`);
+      + (listeners.length ? "" : `<li class="device-empty"><span class="pulse-dots" aria-hidden="true"><i></i><i></i><i></i></span>Waiting for friends — scan the QR code with any phone to add it as a speaker.</li>`));
+    const sum = roomHealth();
+    $("health").className = `health lvl-${sum.level}`;
+    $("health").innerHTML = `${ic(LEVEL_ICON[sum.level], 14)}${esc(sum.text)}`;
     for (const p of listeners) {
       const ok = !!p.status?.calibrated;
       if (ok && !syncedOnce.has(p.info.peer)) { syncedOnce.add(p.info.peer); toast(`${p.info.name ?? "A device"} is in sync`, "ok"); }
@@ -327,6 +410,7 @@ export async function startHost(room: string, keyBytes: Uint8Array, token: strin
 
   // ---- connection ----
   conn.onMessage = async (m) => {
+    if (m.type === "welcome" || m.type === "locked") setLocked(m.locked);
     if (m.type === "welcome" && !host) {
       host = new Host(ctx, conn, key, room, m.epoch);
       host.local = local;
@@ -337,7 +421,13 @@ export async function startHost(room: string, keyBytes: Uint8Array, token: strin
       Object.assign(debug, { host });
     } else if (m.type === "peers") {
       const ids = new Set(m.peers.map((p) => p.peer));
-      for (const [id, p] of peers) if (!ids.has(id)) { peers.delete(id); announced.delete(id); toast(`${p.info.name ?? "A device"} left`); }
+      for (const [id, p] of peers) if (!ids.has(id)) {
+        peers.delete(id);
+        announced.delete(id);
+        for (let i = pending.length - 1; i >= 0; i--) if (pending[i].peer === id) pending.splice(i, 1);
+        if (!removed.delete(id)) toast(`${p.info.name ?? "A device"} left`);
+        renderQueue();
+      }
       for (const p of m.peers) {
         if (p.role !== "listener") continue;
         if (!peers.has(p.peer)) toast(`${p.name ?? "A device"} joined`, "ok");
@@ -347,15 +437,15 @@ export async function startHost(room: string, keyBytes: Uint8Array, token: strin
       if (mic.running) sync.ensure(activeIds());
     } else if (m.type === "peer-status") {
       const p = peers.get(m.peer);
-      if (p) p.status = m.status;
+      if (p) { p.status = m.status; noteStatus(m.peer, m.status); }
       if (m.status.heard) sync.onHelper(m.peer, m.status.heard);
     }
     update();
   };
-  conn.onFatal = (code) => { viz.stop(); timers.forEach(clearInterval); mic.stop(); fatal(code); };
+  conn.onFatal = (code) => { party?.close(); viz.stop(); timers.forEach(clearInterval); mic.stop(); fatal(code); };
   conn.onState = update;
   conn.connect();
-  timers.push(setInterval(() => { conn.send({ type: "status", ...local.status(), source: host?.kind ?? undefined, spreadMs }); update(); }, 2000));
+  timers.push(setInterval(() => { const ls = local.status(); noteStatus(0, ls); conn.send({ type: "status", ...ls, source: host?.kind ?? undefined, spreadMs }); update(); }, 2000));
 
   // ---- sources ----
   const guard = (f: () => Promise<unknown> | unknown) => async () => {
@@ -608,16 +698,37 @@ export async function startHost(room: string, keyBytes: Uint8Array, token: strin
     $("qSave").hidden = false;
     void refreshLibrary();
   };
-  el.onended = () => { if (host?.kind === "file" || host?.kind === "audius") void playNext(); };
+  el.onended = () => { failures = 0; if (host?.kind === "file" || host?.kind === "audius") void playNext(); };
+  // A track that can't load (deleted on Audius, flaky node, unsupported/corrupt file) must not leave the room in
+  // silence: skip it, and stop after a few consecutive failures instead of looping through a broken queue.
+  let failures = 0;
+  el.onerror = () => {
+    if (!(host?.kind === "file" || host?.kind === "audius") || !el.src) return;
+    failures++;
+    const t = queue.current?.title ?? "This track";
+    if (failures >= 3) { toast("Several tracks in a row couldn't play — stopped. Check your connection or try another source.", "warn"); failures = 0; host.stop(); return; }
+    toast(`Couldn't play “${t}” — skipping`, "warn");
+    if (queue.items.length) void playNext(); else host.stop();
+  };
+  el.onplaying = () => { failures = 0; };
 
   // ---- guest song requests (sealed listener → host messages) ----
   const reply = (peer: number, ref: string, ok: boolean, reason?: string) => host?.sendCtl(peer, { type: "request-result", ref, ok, reason });
-  const handleRequest = (peer: number, up: Up) => {
+  const vetting = new Set<number>(); // peers with a request being checked
+  const handleRequest = async (peer: number, up: SongRequest) => {
     const name = peers.get(peer)?.info.name ?? "A guest";
     if (reqMode === "off") return reply(peer, up.ref, false, "Song requests are off right now");
     if (queue.has(up.audiusId) || pending.some((p) => p.item.audiusId === up.audiusId)) return reply(peer, up.ref, true, "It's already in the queue");
-    if (pending.filter((p) => p.peer === peer).length >= 3) return reply(peer, up.ref, false, "You have 3 requests waiting — give the host a moment");
-    const item: QItem = { id: newId(), source: "audius", title: up.title, artist: up.artist, art: up.art, durationS: up.durationS, audiusId: up.audiusId, url: undefined, by: name };
+    if (vetting.has(peer) || pending.filter((p) => p.peer === peer).length >= 3) return reply(peer, up.ref, false, "You have requests waiting — give the host a moment");
+    // Don't trust the guest's title/artwork (spoofing, or making this browser fetch arbitrary URLs):
+    // look the track up on Audius ourselves.
+    vetting.add(peer);
+    const t = await getTrack(up.audiusId).catch(() => null);
+    vetting.delete(peer);
+    if (!t) return reply(peer, up.ref, false, "That track isn't available to stream");
+    if (!peers.has(peer)) return;
+    const item: QItem = { ...fromTrack(t), by: name };
+    up = { ...up, title: t.title };
     if (reqMode === "auto") { enqueue(item, true); reply(peer, up.ref, true); toast(`${name} added “${up.title}”`, "ok"); return; }
     pending.push({ ref: up.ref, peer, name, item });
     toast(`${name} requested “${up.title}”`);
@@ -636,8 +747,25 @@ export async function startHost(room: string, keyBytes: Uint8Array, token: strin
     if (!b || b.kind !== KIND_UP) return;
     const pt = await open(key, room, b.header, b.body);
     const up = pt && parseUp(new TextDecoder().decode(pt));
-    if (up) handleRequest(b.from, up);
+    if (up?.type === "react") onReaction(b.from, up.r);
+    else if (up) void handleRequest(b.from, up);
   };
+
+  // ---- party mode + reactions ----
+  let party: Party | null = null;
+  const canReact = reactionLimiter();
+  const onReaction = (peer: number, r: Reaction) => {
+    if (!peers.has(peer) || !canReact(peer)) return;
+    const name = peers.get(peer)!.info.name;
+    if (party) party.react(r, name ?? "A guest"); else floatReaction($("rx"), r, name);
+  };
+  const togglePartyMode = () => {
+    if (party) { party.close(); return; }
+    viz.stop();
+    party = openParty(link, analyser, () => { party = null; if (document.getElementById("cv")) viz.start(); });
+    renderNow();
+  };
+  $("partyBtn").onclick = togglePartyMode;
   renderQueue();
   // ---- tab sharing ----
   let svc: Service | undefined = SERVICES.find((v) => v.id === sessionStorage.getItem("unison:svc"));
@@ -686,6 +814,7 @@ export async function startHost(room: string, keyBytes: Uint8Array, token: strin
     if (!document.getElementById("pp") || e.metaKey || e.ctrlKey || e.altKey || /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(t.tagName)) return;
     if (e.key === " " && !$("pp").hidden) { e.preventDefault(); $("pp").click(); }
     else if (e.key === "/") { e.preventDefault(); selectTab("audius"); }
+    else if (e.key === "p" || e.key === "P") togglePartyMode();
   });
 
   // ---- transport ----

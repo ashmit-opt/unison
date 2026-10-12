@@ -38,3 +38,16 @@ test("two active mics: no correction until the pair is measured both ways; then 
   expect(Math.abs(d)).toBeCloseTo(15, 1); // the true emission error, not 35
   expect([1, 2]).toContain(id);
 });
+
+test("forget(): a re-synced device is measured from scratch after the settle time", () => {
+  const { sync, adjusts, host, tick } = rig();
+  host({ 1: 5, 2: 30 });
+  expect(adjusts.length).toBe(1);
+  tick(10_000);
+  sync.forget(1);
+  host({ 1: 5, 2: 30 }); // inside the settle window after forget → ignored
+  expect(adjusts.length).toBe(1);
+  tick(4000);
+  host({ 1: 5, 2: 30 });
+  expect(adjusts.length).toBe(2);
+});

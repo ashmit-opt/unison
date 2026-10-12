@@ -22,10 +22,15 @@ export type SourceKind = "tab" | "system" | "file" | "audius" | "clicks";
 export const SOURCE_KINDS: SourceKind[] = ["tab", "system", "file", "audius", "clicks"];
 export type PlayState = "idle" | "waiting" | "playing" | "stopped";
 export type RequestMode = "ask" | "auto" | "off";
-/** Listener → host (inside KIND_UP payloads): ask for an Audius track to be queued. */
-export type Up = { type: "request"; ref: string; audiusId: string; title: string; artist?: string; art?: string; durationS?: number };
+/** Party reactions guests can send (a fixed set: no free text, nothing to moderate). */
+export const REACTIONS = ["fire", "heart", "hands", "party", "laugh"] as const;
+export type Reaction = (typeof REACTIONS)[number];
+
+/** Listener → host (inside KIND_UP payloads): ask for an Audius track to be queued, or react. */
+export type SongRequest = { type: "request"; ref: string; audiusId: string; title: string; artist?: string; art?: string; durationS?: number };
+export type Up = SongRequest | { type: "react"; r: Reaction };
 export type ErrorCode =
-  | "bad-version" | "no-room" | "bad-token" | "room-full" | "bad-message" | "replaced" | "room-closed" | "rate-limit";
+  | "bad-version" | "no-room" | "bad-token" | "room-full" | "bad-message" | "replaced" | "room-closed" | "rate-limit" | "locked" | "removed";
 
 export type Status = {
   state: PlayState;
@@ -44,16 +49,21 @@ export type Status = {
   spreadMs?: number; // host only: last measured acoustic spread
 };
 
-export type Hello = { type: "hello"; v: number; room: string; role: Role; hostToken?: string; peer?: number; name?: string };
+/** `peer` + `resume` (the token from this peer's first welcome) reclaim a peer id after a reconnect. */
+export type Hello = { type: "hello"; v: number; room: string; role: Role; hostToken?: string; peer?: number; resume?: string; name?: string };
 /** Clock probes go out in pairs (`pair` id, `idx` 0/1, 25 ms apart) so queued measurements can be rejected. */
 export type Ping = { type: "ping"; id: number; t0: number; pair?: number; idx?: number };
 export type StatusMsg = { type: "status" } & Status;
 export type StopMsg = { type: "stop"; epoch: number };
-export type ClientMsg = Hello | Ping | StatusMsg | StopMsg;
+/** Host moderation: refuse new devices (members can still reconnect) / disconnect a guest and revoke its resume token. */
+export type LockMsg = { type: "lock"; locked: boolean };
+export type RemoveMsg = { type: "remove"; peer: number };
+export type ClientMsg = Hello | Ping | StatusMsg | StopMsg | LockMsg | RemoveMsg;
 
 export type PeerInfo = { peer: number; role: Role; browser: string; mobile: boolean; name?: string };
 export type ServerMsg =
-  | { type: "welcome"; v: number; peer: number; role: Role; epoch: number; hostOnline: boolean }
+  | { type: "welcome"; v: number; peer: number; role: Role; epoch: number; hostOnline: boolean; locked: boolean; resume?: string }
+  | { type: "locked"; locked: boolean }
   | { type: "pong"; id: number; t0: number; ts: number; pair?: number; idx?: number }
   | { type: "peers"; peers: PeerInfo[] }
   | { type: "peer-status"; peer: number; status: Status }
@@ -71,7 +81,9 @@ export type Ctl =
   | { type: "meta"; epoch: number; kind: SourceKind; title?: string; artist?: string; url?: string; art?: string }
   | { type: "cal-play"; round: number; at: number }
   | { type: "cal-adjust"; deltaMs: number }
-  | { type: "pn"; db: number | null }; // auto-sync code level for this device (null = off)
+  | { type: "pn"; db: number | null } // auto-sync code level for this device (null = off)
+  | { type: "identify" } // Sync Doctor: chime + flash so people can find this device
+  | { type: "resync" }; // Sync Doctor: restart this device's clock estimate and playback timing
 
 const isNum = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x);
 const isInt = (x: unknown, max = 0xffffffff): x is number => Number.isInteger(x) && (x as number) >= 0 && (x as number) <= max;
@@ -117,7 +129,7 @@ export function parseClientMsg(text: string): ClientMsg | null {
       if (!isInt(o.v, 1000) || typeof o.room !== "string" || (o.role !== "host" && o.role !== "listener")) return null;
       return {
         type: "hello", v: o.v, room: o.room, role: o.role,
-        hostToken: str(o.hostToken, 64), peer: isInt(o.peer, 1e6) ? o.peer : undefined, name: deviceName(o.name),
+        hostToken: str(o.hostToken, 64), peer: isInt(o.peer, 1e6) ? o.peer : undefined, resume: str(o.resume, 64), name: deviceName(o.name),
       };
     case "ping": {
       if (!isInt(o.id) || !isNum(o.t0)) return null;
@@ -131,6 +143,10 @@ export function parseClientMsg(text: string): ClientMsg | null {
     }
     case "stop":
       return isInt(o.epoch) ? { type: "stop", epoch: o.epoch } : null;
+    case "lock":
+      return typeof o.locked === "boolean" ? { type: "lock", locked: o.locked } : null;
+    case "remove":
+      return isInt(o.peer, 1e6) ? { type: "remove", peer: o.peer } : null;
   }
   return null;
 }
@@ -156,6 +172,7 @@ const qview = (x: unknown): QueueView | undefined => {
 
 export function parseUp(text: string): Up | null {
   const o = parseJson(text, MAX_TEXT);
+  if (o?.type === "react") return REACTIONS.includes(o.r as Reaction) ? { type: "react", r: o.r as Reaction } : null;
   if (!o || o.type !== "request") return null;
   const ref = str(o.ref, 40), audiusId = str(o.audiusId, 20), title = str(o.title, 200);
   if (!ref || !audiusId || !/^[A-Za-z0-9]+$/.test(audiusId) || !title) return null;
@@ -173,6 +190,8 @@ export function parseCtl(text: string): Ctl | null {
     return { type: "meta", epoch: o.epoch, kind: o.kind as SourceKind, title: str(o.title, 300), artist: str(o.artist, 300), url: httpsUrl(o.url), art: httpsUrl(o.art) };
   if (o.type === "cal-play" && isInt(o.round, 1000) && isNum(o.at)) return { type: "cal-play", round: o.round, at: o.at };
   if (o.type === "cal-adjust" && isNum(o.deltaMs) && Math.abs(o.deltaMs) < 2000) return { type: "cal-adjust", deltaMs: o.deltaMs };
+  if (o.type === "identify") return { type: "identify" };
+  if (o.type === "resync") return { type: "resync" };
   if (o.type === "pn" && (o.db === null || (isNum(o.db) && o.db >= -60 && o.db <= -10))) return { type: "pn", db: o.db as number | null };
   return null;
 }

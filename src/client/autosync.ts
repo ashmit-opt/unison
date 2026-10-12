@@ -128,6 +128,16 @@ export class AutoSyncHost {
     this.step();
   }
 
+  /** Sync Doctor "Re-sync": discard what we know about a device and measure it again from scratch
+   *  (after the usual settle time, so measurements from before the restart are never used). */
+  forget(id: number) {
+    for (const key of this.history.keys()) if (key.startsWith(`${id}:`) || key.endsWith(`:${id}`)) this.history.delete(key);
+    for (const m of this.heard.values()) m.delete(id);
+    this.heard.delete(id);
+    this.lastAdjust.set(id, this.clock());
+    this.deps.reset(id);
+  }
+
   onHelper(micId: number, heard: Record<string, number>) {
     this.record(micId, new Map(Object.entries(heard).map(([k, v]) => [Number(k), v])));
   }

@@ -15,7 +15,7 @@ class FakeConn {
   last(type: string) { return this.text.filter((m) => m.type === type).at(-1) as any; }
 }
 
-function connect(R: Rooms, room: string, role: "host" | "listener", extra: Partial<ClientMsg & { hostToken: string; peer: number; v: number }> = {}) {
+function connect(R: Rooms, room: string, role: "host" | "listener", extra: Partial<ClientMsg & { hostToken: string; peer: number; v: number; resume: string }> = {}) {
   const c = new FakeConn(), s = R.session(c, "safari", true);
   R.text(s, { type: "hello", v: 1, room, role, ...extra } as ClientMsg);
   return { c, s };
@@ -103,8 +103,9 @@ test("reconnecting listener keeps its peer id; host reload replaces the old host
   const h1 = connect(R, room, "host", { hostToken });
   const l1 = connect(R, room, "listener");
   R.leave(l1.s);
-  const l2 = connect(R, room, "listener", { peer: l1.s.peer });
+  const l2 = connect(R, room, "listener", { peer: l1.s.peer, resume: l1.c.last("welcome").resume });
   expect(l2.s.peer).toBe(l1.s.peer);
+  expect(R.rooms.get(room)!.stats).toMatchObject({ joins: 1, reconnects: 1 });
   const h2 = connect(R, room, "host", { hostToken });
   expect(h1.c.closed).toBe("replaced");
   expect(R.rooms.get(room)!.host).toBe(h2.s);
@@ -163,7 +164,7 @@ test("lifecycle: empty room, absent host, max lifetime; one anonymous record eac
   const text = JSON.stringify(rec);
   expect(text.includes(b.room)).toBe(false);
   expect(text.includes(b.hostToken)).toBe(false);
-  expect(Object.keys(rec).sort()).toEqual(["browsers", "calibrated", "day", "desktop", "drops", "durationS", "joins", "late", "mobile", "peakPeers", "playedS", "played", "resyncs", "sources", "spreadMs", "authFail", "v"].sort());
+  expect(Object.keys(rec).sort()).toEqual(["browsers", "calibrated", "day", "desktop", "drops", "durationS", "joins", "reconnects", "late", "mobile", "peakPeers", "playedS", "played", "resyncs", "sources", "spreadMs", "authFail", "v"].sort());
 });
 
 test("coarse user agent", () => {
@@ -198,4 +199,40 @@ test("listeners can only send song requests, stamped with their own id, and only
   expect([h.c.bin.length, b.c.bin.length, a.s.bad]).toEqual([1, 0, 2]);
   R.binary(h.s, up(0)); // and the host can't send up frames
   expect(h.s.bad).toBe(1);
+});
+
+test("a peer id can only be reclaimed with its resume token (no impersonating a disconnected guest)", () => {
+  const R = rooms(), { room, hostToken } = R.create()!;
+  connect(R, room, "host", { hostToken });
+  const l1 = connect(R, room, "listener");
+  const token = l1.c.last("welcome").resume;
+  expect(token).toMatch(/^[A-Za-z0-9_-]{22}$/);
+  R.leave(l1.s);
+  expect(connect(R, room, "listener", { peer: l1.s.peer }).s.peer).not.toBe(l1.s.peer); // no token
+  expect(connect(R, room, "listener", { peer: l1.s.peer, resume: "x".repeat(22) }).s.peer).not.toBe(l1.s.peer); // wrong token
+  expect(connect(R, room, "listener", { peer: l1.s.peer, resume: token }).s.peer).toBe(l1.s.peer);
+  expect(connect(R, room, "listener", { peer: l1.s.peer, resume: token }).s.peer).not.toBe(l1.s.peer); // already connected
+});
+
+test("moderation: host locks the room (new devices refused, members can reconnect) and removes a guest", () => {
+  const R = rooms(), { room, hostToken } = R.create()!;
+  const h = connect(R, room, "host", { hostToken });
+  const a = connect(R, room, "listener"), b = connect(R, room, "listener");
+  R.text(a.s, { type: "lock", locked: true } as ClientMsg); // listeners can't
+  expect(R.rooms.get(room)!.locked).toBe(false);
+  R.text(h.s, { type: "lock", locked: true } as ClientMsg);
+  expect(h.c.last("locked")).toEqual({ type: "locked", locked: true });
+  expect(connect(R, room, "listener").c.closed).toBe("locked");
+  R.leave(a.s);
+  expect(connect(R, room, "listener", { peer: a.s.peer, resume: a.c.last("welcome").resume }).c.closed).toBeNull(); // member reconnects
+  const h2 = connect(R, room, "host", { hostToken }); // host reload learns the state
+  expect(h2.c.last("welcome").locked).toBe(true);
+
+  R.text(b.s, { type: "remove", peer: a.s.peer } as ClientMsg); // listeners can't remove anyone
+  R.text(h2.s, { type: "remove", peer: b.s.peer } as ClientMsg);
+  expect(b.c.closed).toBe("removed");
+  R.leave(b.s);
+  expect(connect(R, room, "listener", { peer: b.s.peer, resume: b.c.last("welcome").resume }).c.closed).toBe("locked"); // token revoked
+  R.text(h2.s, { type: "lock", locked: false } as ClientMsg);
+  expect(connect(R, room, "listener").c.closed).toBeNull();
 });

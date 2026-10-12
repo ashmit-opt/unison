@@ -24,6 +24,8 @@ export function ic(name: IconName, size = 18): string {
 
 export const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 export const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
+/** While a modal overlay is open, the page behind it can't be focused or clicked (keyboard / screen readers). */
+export const setInert = (on: boolean) => document.getElementById("app")?.toggleAttribute("inert", on);
 
 export function fmtTime(s: number): string {
   if (!Number.isFinite(s) || s < 0) return "0:00";

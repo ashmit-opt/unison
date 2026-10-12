@@ -95,8 +95,11 @@ test("song requests (up frames) and queue snapshots are validated", async () => 
   const frame = new Uint8Array(6 + 40); frame.set(upHeader(7));
   const p = parseBinary(frame);
   expect(p?.kind === KIND_UP && p.from).toBe(7);
-  expect(parseUp(JSON.stringify({ type: "request", ref: "r1", audiusId: "JbKjZ", title: "Song" }))?.audiusId).toBe("JbKjZ");
+  expect(parseUp(JSON.stringify({ type: "request", ref: "r1", audiusId: "JbKjZ", title: "Song" }))).toMatchObject({ audiusId: "JbKjZ" });
   expect(parseUp(JSON.stringify({ type: "request", ref: "r1", audiusId: "../x", title: "Song" }))).toBeNull();
+  expect(parseUp(JSON.stringify({ type: "react", r: "fire" }))).toEqual({ type: "react", r: "fire" });
+  expect(parseUp(JSON.stringify({ type: "react", r: "<img src=x>" }))).toBeNull(); // only the fixed set
+  expect(parseUp(JSON.stringify({ type: "react", r: "toString" }))).toBeNull();
   const q = parseCtl(JSON.stringify({ type: "queue", mode: "ask", next: [{ title: "A", by: "brave fox", art: "javascript:x" }, { nope: 1 }] }));
   expect(q).toEqual({ type: "queue", mode: "ask", now: undefined, next: [{ title: "A", artist: undefined, art: undefined, by: "brave fox" }] });
   expect(parseCtl(JSON.stringify({ type: "request-result", ref: "r1", ok: false, reason: "Requests are off" }))?.type).toBe("request-result");

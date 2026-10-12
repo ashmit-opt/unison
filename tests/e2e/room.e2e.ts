@@ -1,5 +1,11 @@
 // Real browser flows (Chromium): create → host plays → listeners join, late join, reconnect, stop, PWA.
-import { expect, test, type Browser, type Page } from "@playwright/test";
+import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
+
+// Contexts made from the worker-scoped browser outlive the test unless closed: earlier rooms would keep playing
+// audio and slow every later test.
+const contexts: BrowserContext[] = [];
+const newPage = async (browser: Browser) => { const c = await browser.newContext(); contexts.push(c); return c.newPage(); };
+test.afterEach(async () => { await Promise.all(contexts.splice(0).map((c) => c.close())); });
 
 /** 8 s, 48 kHz stereo 16-bit WAV with a 440 Hz tone. */
 function toneWav(seconds = 8): Buffer {
@@ -17,7 +23,7 @@ function toneWav(seconds = 8): Buffer {
 }
 
 async function createRoom(browser: Browser) {
-  const host = await (await browser.newContext()).newPage();
+  const host = await newPage(browser);
   await host.goto("/");
   await host.click("#create");
   await expect(host.locator("#link")).toContainText("#k=");
@@ -27,7 +33,7 @@ async function createRoom(browser: Browser) {
 }
 
 async function join(browser: Browser, link: string) {
-  const page = await (await browser.newContext()).newPage();
+  const page = await newPage(browser);
   await page.goto(link);
   await page.click("#go");
   await expect(page.locator("#st")).not.toHaveText("Connecting…");
@@ -287,6 +293,106 @@ test("songs added to the library survive a reload; queue auto-advances", async (
   await host.click('[data-tab="file"]');
   await expect(host.locator("#libList")).toContainText("first", { timeout: 10_000 });
   await expect(host.locator("#libList")).toContainText("second");
+});
+
+test("regression: a track that can't play is skipped instead of leaving the room silent", async ({ browser }) => {
+  const { host } = await createRoom(browser);
+  await host.click('[data-tab="file"]');
+  await host.setInputFiles("#file", [
+    { name: "broken.mp3", mimeType: "audio/mpeg", buffer: Buffer.from("this is not audio at all".repeat(50)) },
+    { name: "fine.wav", mimeType: "audio/wav", buffer: toneWav(3) },
+  ]);
+  await expect(host.locator("#npTitle")).toHaveText("fine", { timeout: 10_000 });
+  await expect(host.locator(".toast").filter({ hasText: "skipping" })).toHaveCount(1);
+});
+
+test("Sync Doctor: expand a device, identify it (listener chimes + shows its name), re-sync it", async ({ browser }) => {
+  const { host, link } = await createRoom(browser);
+  const a = await join(browser, link);
+  await host.setInputFiles("#file", { name: "tone.wav", mimeType: "audio/wav", buffer: toneWav(20) });
+  await expect(a.locator("#st")).toHaveText("Playing", { timeout: 10_000 });
+  const chip = host.locator('#devices [data-expand]:not([data-expand="0"])');
+  await expect(chip).toHaveAttribute("aria-expanded", "false", { timeout: 5_000 });
+  await chip.click();
+  const panel = host.locator("#devices .device .doctor:not([hidden])");
+  await expect(panel).toBeVisible();
+  await expect(chip).toHaveAttribute("aria-expanded", "true");
+  await expect(panel.locator(".facts")).toContainText("Network round trip");
+  await expect(panel.locator(".src-measured").first()).toBeVisible(); // every number says where it came from
+  await expect(host.locator("#health")).not.toBeEmpty();
+
+  const name = (await a.evaluate(() => (window as any).__unison.conn.name)) as string;
+  await panel.locator('[data-act="identify"]').click();
+  await expect(a.locator(".identify")).toContainText(name);
+  await expect(a.locator(".identify")).toHaveCount(0, { timeout: 5_000 }); // goes away by itself
+
+  await chip.click(); // collapse and reopen: state survives re-renders
+  await expect(panel).toHaveCount(0);
+  await chip.click();
+  const before = (await stats(a)).chunks;
+  await panel.locator('[data-act="resync"]').click();
+  await expect(a.locator(".toast").filter({ hasText: "Re-syncing" })).toBeVisible();
+  await expect.poll(async () => (await stats(a)).chunks - before, { timeout: 10_000 }).toBeGreaterThan(15); // keeps playing
+  await expect(a.locator("#st")).toHaveText("Playing");
+  expect((await stats(a)).decodeErrors).toBe(0);
+});
+
+test("party mode: full-screen display with QR, listener count and guest reactions", async ({ browser }) => {
+  const { host, link } = await createRoom(browser);
+  const a = await join(browser, link);
+  await host.setInputFiles("#file", { name: "party.wav", mimeType: "audio/wav", buffer: toneWav(20) });
+  await expect(a.locator("#st")).toHaveText("Playing", { timeout: 10_000 });
+
+  // Outside party mode a reaction floats over the now-playing card.
+  await a.locator('.react[data-r="fire"]').click();
+  await expect(a.locator("#rx .rx")).toHaveCount(1); // sender's own feedback
+  await expect(host.locator("#rx .rx")).toContainText("🔥");
+
+  await host.click("#partyBtn");
+  const party = host.locator(".party");
+  await expect(party).toBeVisible();
+  await expect(party.locator("#pTitle")).toHaveText("party");
+  await expect(party.locator("#pCount")).toContainText("1 phone listening");
+  await expect(party.locator(".qr svg")).toBeVisible();
+  await host.keyboard.press("Tab"); // the page behind the dialog is inert: focus stays inside
+  expect(await host.evaluate(() => !!document.activeElement?.closest(".party") || document.activeElement === document.body)).toBe(true);
+
+  // In party mode reactions float on the big screen with the guest's name (rate limits: unit-tested).
+  await a.waitForTimeout(600); // guests are throttled to one reaction per 500 ms
+  await a.locator('.react[data-r="heart"]').click();
+  await expect(party.locator("#pRx .rx")).toContainText(await a.evaluate(() => (window as any).__unison.conn.name));
+
+  await party.locator("#pExit").click();
+  await expect(party).toHaveCount(0);
+  await expect(host.locator("#partyBtn")).toBeFocused();
+});
+
+test("moderation: locked room refuses new devices, members reconnect, removed guest sees why", async ({ browser }) => {
+  const { host, link } = await createRoom(browser);
+  const a = await join(browser, link);
+  await expect(host.locator("#devices .device")).toHaveCount(2);
+  await host.locator("#lockRoom").check();
+  await expect(host.locator("#lockHint")).toContainText("Locked");
+
+  const late = await newPage(browser);
+  await late.goto(link);
+  await expect(late.locator("h1")).toHaveText("This room is locked");
+
+  // A member's connection drops: it gets back in (resume token) even though the room is locked.
+  const peer = await a.evaluate(() => (window as any).__unison.conn.peer);
+  await a.evaluate(() => (window as any).__unison.conn.drop());
+  await expect.poll(() => a.evaluate(() => (window as any).__unison.conn.connected), { timeout: 10_000 }).toBe(true);
+  expect(await a.evaluate(() => (window as any).__unison.conn.peer)).toBe(peer);
+
+  await host.locator(`#devices [data-expand="${peer}"]`).click();
+  await host.locator(`#devices [data-act="remove"][data-id="${peer}"]`).click();
+  await expect(a.locator("h1")).toHaveText("You were removed from the room");
+  await expect(host.locator("#devices .device")).toHaveCount(1);
+
+  await host.locator("#lockRoom").uncheck();
+  await late.getByRole("link", { name: "Try again" }).click();
+  await late.click("#go");
+  await expect(host.locator("#devices .device")).toHaveCount(2);
 });
 
 test("incomplete link and missing room are explained", async ({ page }) => {
